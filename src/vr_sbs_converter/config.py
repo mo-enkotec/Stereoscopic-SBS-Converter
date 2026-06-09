@@ -7,6 +7,9 @@ from typing import Literal
 SbsMode = Literal["full", "half"]
 DeviceMode = Literal["auto", "cpu", "cuda"]
 DepthBackend = Literal["auto", "midas", "luma"]
+ProfileMode = Literal["halo-safe", "balanced", "fast"]
+PerfMode = Literal["quality", "gpu-balanced", "max-speed"]
+EncoderMode = Literal["auto", "libx264", "h264_nvenc"]
 
 _RESOLUTION_ALIASES = {
     "480p": 480,
@@ -31,6 +34,12 @@ class ConversionConfig:
     crf: int = 18
     device: DeviceMode = "auto"
     depth_backend: DepthBackend = "auto"
+    profile: ProfileMode = "halo-safe"
+    perf_mode: PerfMode = "quality"
+    encoder: EncoderMode = "auto"
+    max_disparity_px: int | None = None
+    depth_process_scale: float | None = None
+    edge_protect_strength: float | None = None
     stereo_strength: float = 0.8
     overwrite: bool = False
     keep_temp: bool = False
@@ -49,6 +58,34 @@ class ConversionConfig:
             raise ValueError("Invalid --depth-backend value.")
         if self.sbs_mode not in {"full", "half"}:
             raise ValueError("Invalid --sbs-mode value.")
+        if self.profile not in {"halo-safe", "balanced", "fast"}:
+            raise ValueError("Invalid --profile value.")
+        if self.perf_mode not in {"quality", "gpu-balanced", "max-speed"}:
+            raise ValueError("Invalid --perf-mode value.")
+        if self.encoder not in {"auto", "libx264", "h264_nvenc"}:
+            raise ValueError("Invalid --encoder value.")
+
+        if self.max_disparity_px is None:
+            self.max_disparity_px = {"halo-safe": 12, "balanced": 16, "fast": 22}[self.profile]
+        if self.depth_process_scale is None:
+            self.depth_process_scale = {
+                "quality": 1.0,
+                "gpu-balanced": 0.75,
+                "max-speed": 0.6,
+            }[self.perf_mode]
+        if self.edge_protect_strength is None:
+            self.edge_protect_strength = {
+                "halo-safe": 0.9,
+                "balanced": 0.75,
+                "fast": 0.55,
+            }[self.profile]
+
+        if self.max_disparity_px <= 0 or self.max_disparity_px > 128:
+            raise ValueError("--max-disparity-px must be in range [1, 128].")
+        if self.depth_process_scale <= 0 or self.depth_process_scale > 1:
+            raise ValueError("--depth-process-scale must be in range (0, 1].")
+        if self.edge_protect_strength < 0 or self.edge_protect_strength > 1:
+            raise ValueError("--edge-protect-strength must be in range [0, 1].")
 
 
 def parse_target_height(value: str) -> int:

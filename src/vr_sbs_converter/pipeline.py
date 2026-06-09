@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
+from time import perf_counter
 import shutil
 import tempfile
 from pathlib import Path
@@ -18,12 +20,39 @@ from .video_io import (
     VideoIOError,
     close_reader,
     close_writer,
+    ffmpeg_nvenc_usable,
+    ffmpeg_supports_encoder,
     mux_audio_track,
     open_frame_reader,
     open_frame_writer,
     read_raw_frame,
     write_raw_frame,
 )
+
+
+@dataclass(slots=True)
+class RuntimePlan:
+    depth_process_scale: float
+    use_fp16: bool
+    preferred_encoder: str
+
+
+def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
+    depth_scale = config.depth_process_scale if config.depth_process_scale is not None else 1.0
+    use_fp16 = config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}
+
+    if config.encoder != "auto":
+        preferred_encoder = config.encoder
+    elif config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}:
+        preferred_encoder = "h264_nvenc"
+    else:
+        preferred_encoder = config.codec
+
+    return RuntimePlan(
+        depth_process_scale=depth_scale,
+        use_fp16=use_fp16,
+        preferred_encoder=preferred_encoder,
+    )
 
 
 @contextmanager
@@ -65,6 +94,7 @@ def _prepare_sbs_dimensions(width: int, height: int, mode: str) -> tuple[int, in
 
 def run_conversion(config: ConversionConfig) -> None:
     ensure_ffmpeg_installed()
+    runtime_plan = resolve_runtime_plan(config)
     metadata = probe_video(config.input_path)
     process_width, process_height = _resolve_processing_dimensions(
         metadata.width, metadata.height, config
@@ -74,17 +104,30 @@ def run_conversion(config: ConversionConfig) -> None:
     )
 
     upscaler = create_default_upscaler() if config.upscale else None
-    depth_estimator = create_depth_estimator(config.depth_backend, config.device)
+    depth_estimator = create_depth_estimator(
+        config.depth_backend,
+        config.device,
+        edge_protect_strength=config.edge_protect_strength or 0.75,
+        depth_process_scale=runtime_plan.depth_process_scale,
+        use_fp16=runtime_plan.use_fp16,
+    )
 
     with _working_directory(config) as work_dir:
         silent_output = work_dir / "sbs_silent.mp4"
         reader = open_frame_reader(config.input_path)
+        writer_codec = runtime_plan.preferred_encoder
+        if writer_codec == "h264_nvenc":
+            if not ffmpeg_supports_encoder("h264_nvenc") or not ffmpeg_nvenc_usable():
+                writer_codec = config.codec
+                print("h264_nvenc unavailable at runtime; falling back to CPU encoder.")
+
         writer = open_frame_writer(
             output_path=silent_output,
             width=output_width,
             height=output_height,
             fps=metadata.fps,
             config=config,
+            codec_override=writer_codec,
         )
 
         progress = tqdm(
@@ -93,23 +136,40 @@ def run_conversion(config: ConversionConfig) -> None:
             desc="Converting",
             leave=True,
         )
+        decode_time = 0.0
+        depth_time = 0.0
+        stereo_time = 0.0
+        encode_time = 0.0
+        frames_processed = 0
         conversion_failed = False
         try:
             while True:
+                t0 = perf_counter()
                 frame = read_raw_frame(reader, metadata.width, metadata.height)
+                decode_time += perf_counter() - t0
                 if frame is None:
                     break
                 if upscaler is not None:
                     frame = upscaler.upscale(frame, process_width, process_height)
 
+                t1 = perf_counter()
                 depth = depth_estimator.estimate(frame)
+                depth_time += perf_counter() - t1
+
+                t2 = perf_counter()
                 left_eye, right_eye = synthesize_stereo_views(
                     frame_bgr=frame,
                     depth=depth,
                     stereo_strength=config.stereo_strength,
+                    max_disparity_px=config.max_disparity_px,
                 )
                 sbs_frame = compose_sbs(left_eye, right_eye, config.sbs_mode)
+                stereo_time += perf_counter() - t2
+
+                t3 = perf_counter()
                 write_raw_frame(writer, sbs_frame)
+                encode_time += perf_counter() - t3
+                frames_processed += 1
                 progress.update(1)
         except KeyboardInterrupt as exc:
             conversion_failed = True
@@ -145,6 +205,19 @@ def run_conversion(config: ConversionConfig) -> None:
             if temp_silent.exists():
                 temp_silent.unlink()
 
+        if frames_processed > 0:
+            fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)
+            print(
+                "Runtime summary: "
+                f"profile={config.profile}, perf_mode={config.perf_mode}, "
+                f"encoder={writer_codec}, depth_scale={runtime_plan.depth_process_scale:.2f}, "
+                f"frames={frames_processed}, effective_fps={fps:.2f}, "
+                f"decode_ms={decode_time * 1000 / frames_processed:.2f}, "
+                f"depth_ms={depth_time * 1000 / frames_processed:.2f}, "
+                f"stereo_ms={stereo_time * 1000 / frames_processed:.2f}, "
+                f"encode_ms={encode_time * 1000 / frames_processed:.2f}"
+            )
+
 
 def dry_run_example_frame(
     frame_bgr: np.ndarray,
@@ -160,7 +233,19 @@ def dry_run_example_frame(
         )
         frame_bgr = upscaler.upscale(frame_bgr, process_width, process_height)
 
-    depth_estimator = create_depth_estimator("luma", config.device)
+    runtime_plan = resolve_runtime_plan(config)
+    depth_estimator = create_depth_estimator(
+        "luma",
+        config.device,
+        edge_protect_strength=config.edge_protect_strength or 0.75,
+        depth_process_scale=runtime_plan.depth_process_scale,
+        use_fp16=runtime_plan.use_fp16,
+    )
     depth = depth_estimator.estimate(frame_bgr)
-    left_eye, right_eye = synthesize_stereo_views(frame_bgr, depth, config.stereo_strength)
+    left_eye, right_eye = synthesize_stereo_views(
+        frame_bgr,
+        depth,
+        config.stereo_strength,
+        max_disparity_px=config.max_disparity_px,
+    )
     return compose_sbs(left_eye, right_eye, config.sbs_mode)

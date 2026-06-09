@@ -36,3 +36,24 @@ def test_dry_run_example_frame_returns_sbs_shape() -> None:
     )
     sbs = dry_run_example_frame(frame, config)
     assert sbs.shape == (24, 72, 3)
+
+
+def test_occlusion_aware_synthesis_limits_color_bleed() -> None:
+    frame = np.zeros((64, 96, 3), dtype=np.uint8)
+    frame[:, :48] = (255, 0, 0)
+    frame[:, 48:] = (0, 255, 0)
+    frame[20:44, 34:58] = (0, 0, 255)
+
+    depth = np.full((64, 96), 0.25, dtype=np.float32)
+    depth[20:44, 34:58] = 0.95
+
+    left_eye, _ = synthesize_stereo_views(
+        frame,
+        depth,
+        stereo_strength=1.0,
+        max_disparity_px=8,
+    )
+
+    inner_edge_band = left_eye[22:42, 54:58]
+    assert float(inner_edge_band[..., 2].mean()) > 150.0
+    assert float(inner_edge_band[..., 1].mean()) < 90.0

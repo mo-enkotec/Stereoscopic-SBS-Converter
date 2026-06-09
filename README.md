@@ -38,6 +38,44 @@ pip install torch transformers
 python main.py /path/to/input.mp4 -o /path/to/output_sbs.mp4 --overwrite
 ```
 
+### Halo-safe quality mode (recommended default)
+
+```bash
+python main.py /path/to/input.mp4 \
+  -o /path/to/output_halo_safe.mp4 \
+  --profile halo-safe \
+  --perf-mode quality \
+  --depth-backend auto \
+  --encoder auto \
+  --overwrite
+```
+
+### GPU-balanced mode (GTX 2070 Super)
+
+```bash
+python main.py /path/to/input.mp4 \
+  -o /path/to/output_gpu_balanced.mp4 \
+  --profile halo-safe \
+  --perf-mode gpu-balanced \
+  --device cuda \
+  --depth-backend auto \
+  --encoder auto \
+  --overwrite
+```
+
+### Fast mode (speed-priority with more artifact risk)
+
+```bash
+python main.py /path/to/input.mp4 \
+  -o /path/to/output_fast.mp4 \
+  --profile fast \
+  --perf-mode max-speed \
+  --device cuda \
+  --depth-backend auto \
+  --encoder auto \
+  --overwrite
+```
+
 ### Convert and upscale to 4K
 
 ```bash
@@ -64,8 +102,16 @@ python main.py /path/to/input.mp4 \
 - `--sbs-mode {full,half}`: full keeps each eye at full width; half packs each eye at half width.
 - `--upscale --target <value>`: enable upscaling (`2160p`, `4k`, `3840x2160`, etc.).
 - `--depth-backend {auto,midas,luma}`: depth estimator selection.
+- `--profile {halo-safe,balanced,fast}`: halo control and disparity defaults.
+- `--perf-mode {quality,gpu-balanced,max-speed}`: quality/speed profile.
+- `--encoder {auto,libx264,h264_nvenc}`: auto tries NVENC and falls back safely.
+- `--max-disparity-px <int>`: explicit disparity cap to limit edge pull artifacts.
+- `--depth-process-scale <float>`: depth inference resolution scale; lower values increase speed.
+- `--edge-protect-strength <float>`: depth edge-preservation intensity.
 - `--stereo-strength <float>`: disparity intensity (recommended range `0.4` to `1.2`).
 - `--codec`, `--preset`, `--crf`: ffmpeg encode controls.
+
+At the end of conversion, the CLI prints a runtime summary containing selected profile/perf mode, encoder path, effective FPS, and average stage timings.
 
 ## Run tests
 

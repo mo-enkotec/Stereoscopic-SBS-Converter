@@ -46,6 +46,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Depth backend. 'auto' prefers MiDaS when available.",
     )
     parser.add_argument(
+        "--profile",
+        choices=["halo-safe", "balanced", "fast"],
+        default="halo-safe",
+        help="Artifact/quality profile. 'halo-safe' prioritizes reduced edge pull artifacts.",
+    )
+    parser.add_argument(
+        "--perf-mode",
+        choices=["quality", "gpu-balanced", "max-speed"],
+        default="quality",
+        help="Performance mode. 'gpu-balanced' is recommended for GTX-class GPUs.",
+    )
+    parser.add_argument(
+        "--encoder",
+        choices=["auto", "libx264", "h264_nvenc"],
+        default="auto",
+        help="Encoder selection. 'auto' picks NVENC when available.",
+    )
+    parser.add_argument(
+        "--max-disparity-px",
+        type=int,
+        help="Maximum horizontal disparity in pixels per eye. Lower values reduce halo risk.",
+    )
+    parser.add_argument(
+        "--depth-process-scale",
+        type=float,
+        help="Scale factor for depth inference resolution (0-1]. Lower is faster.",
+    )
+    parser.add_argument(
+        "--edge-protect-strength",
+        type=float,
+        help="Edge protection intensity for depth/stereo processing (0-1).",
+    )
+    parser.add_argument(
         "--stereo-strength",
         type=float,
         default=0.8,
@@ -103,6 +136,12 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         crf=args.crf,
         device=args.device,
         depth_backend=args.depth_backend,
+        profile=args.profile,
+        perf_mode=args.perf_mode,
+        encoder=args.encoder,
+        max_disparity_px=args.max_disparity_px,
+        depth_process_scale=args.depth_process_scale,
+        edge_protect_strength=args.edge_protect_strength,
         stereo_strength=args.stereo_strength,
         overwrite=args.overwrite,
         keep_temp=args.keep_temp,

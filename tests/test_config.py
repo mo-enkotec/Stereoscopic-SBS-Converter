@@ -30,3 +30,12 @@ def test_conversion_config_rejects_invalid_crf(tmp_path: Path) -> None:
             output_path=tmp_path / "out.mp4",
             crf=99,
         )
+
+
+def test_conversion_config_rejects_invalid_depth_scale(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        ConversionConfig(
+            input_path=tmp_path / "in.mp4",
+            output_path=tmp_path / "out.mp4",
+            depth_process_scale=1.2,
+        )

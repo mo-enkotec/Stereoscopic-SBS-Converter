@@ -22,6 +22,49 @@ class FrameStream:
     fps: float
 
 
+def ffmpeg_supports_encoder(encoder_name: str) -> bool:
+    command = ["ffmpeg", "-v", "error", "-hide_banner", "-encoders"]
+    try:
+        result = run_command(command)
+    except FFmpegError:
+        return False
+    return encoder_name in result.stdout
+
+
+def ffmpeg_nvenc_usable() -> bool:
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=size=16x16:rate=1:color=black",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "h264_nvenc",
+        "-f",
+        "null",
+        "-",
+    ]
+    process = subprocess.run(command, capture_output=True, text=True, check=False)
+    return process.returncode == 0
+
+
+def _nvenc_preset_from_x264(preset: str) -> str:
+    mapping = {
+        "veryslow": "p7",
+        "slower": "p6",
+        "slow": "p5",
+        "medium": "p4",
+        "fast": "p3",
+        "faster": "p2",
+        "veryfast": "p1",
+    }
+    return mapping.get(preset, "p4")
+
+
 def open_frame_reader(input_path: Path) -> FrameStream:
     command = [
         "ffmpeg",
@@ -68,8 +111,10 @@ def open_frame_writer(
     height: int,
     fps: float,
     config: ConversionConfig,
+    codec_override: str | None = None,
 ) -> subprocess.Popen[bytes]:
     overwrite_flag = "-y" if config.overwrite else "-n"
+    codec_name = codec_override or config.codec
     command = [
         "ffmpeg",
         "-v",
@@ -86,14 +131,30 @@ def open_frame_writer(
         "-i",
         "-",
         "-an",
-        "-c:v",
-        config.codec,
-        "-preset",
-        config.preset,
-        "-crf",
-        str(config.crf),
-        str(output_path),
     ]
+
+    if codec_name == "h264_nvenc":
+        command += [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            _nvenc_preset_from_x264(config.preset),
+            "-cq:v",
+            str(config.crf),
+            "-b:v",
+            "0",
+        ]
+    else:
+        command += [
+            "-c:v",
+            codec_name,
+            "-preset",
+            config.preset,
+            "-crf",
+            str(config.crf),
+        ]
+
+    command.append(str(output_path))
     return subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 

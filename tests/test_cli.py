@@ -43,3 +43,34 @@ def test_build_config_rejects_existing_output_without_overwrite(tmp_path: Path) 
 
     with pytest.raises(FileExistsError):
         build_config(args)
+
+
+def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
+    input_file = tmp_path / "scene.mp4"
+    input_file.write_bytes(b"fake")
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            str(input_file),
+            "--profile",
+            "halo-safe",
+            "--perf-mode",
+            "gpu-balanced",
+            "--encoder",
+            "auto",
+            "--max-disparity-px",
+            "16",
+            "--depth-process-scale",
+            "0.75",
+            "--edge-protect-strength",
+            "0.85",
+            "--overwrite",
+        ]
+    )
+    config = build_config(args)
+    assert config.profile == "halo-safe"
+    assert config.perf_mode == "gpu-balanced"
+    assert config.encoder == "auto"
+    assert config.max_disparity_px == 16
+    assert config.depth_process_scale == 0.75
+    assert config.edge_protect_strength == 0.85
