@@ -38,6 +38,17 @@ pip install torch transformers
 python main.py /path/to/input.mp4 -o /path/to/output_sbs.mp4 --overwrite
 ```
 
+### HereSphere / Quest compatibility-focused conversion (full-SBS retained)
+
+```bash
+python main.py /path/to/input.mp4 \
+  -o /path/to/output_compat_fullsbs.mp4 \
+  --sbs-mode full \
+  --compat-profile strict \
+  --audio-fallback copy-aac \
+  --overwrite
+```
+
 ### Halo-safe quality mode (recommended default)
 
 ```bash
@@ -105,6 +116,8 @@ python main.py /path/to/input.mp4 \
 - `--profile {halo-safe,balanced,fast}`: halo control and disparity defaults.
 - `--perf-mode {quality,gpu-balanced,max-speed}`: quality/speed profile.
 - `--encoder {auto,libx264,h264_nvenc}`: auto tries NVENC and falls back safely.
+- `--compat-profile {strict,off}`: `strict` forces player-friendly MP4/H.264 flags (`yuv420p`, high profile, `+faststart`, BT.709 tags).
+- `--audio-fallback {copy-aac}`: copy source audio first, retry mux with AAC only when needed.
 - `--max-disparity-px <int>`: explicit disparity cap to limit edge pull artifacts.
 - `--depth-process-scale <float>`: depth inference resolution scale; lower values increase speed.
 - `--edge-protect-strength <float>`: depth edge-preservation intensity.
@@ -112,6 +125,10 @@ python main.py /path/to/input.mp4 \
 - `--codec`, `--preset`, `--crf`: ffmpeg encode controls.
 
 At the end of conversion, the CLI prints a runtime summary containing selected profile/perf mode, encoder path, effective FPS, and average stage timings.
+
+In strict compatibility mode, the converter may print compatibility warnings after encoding if stream properties are likely to fail in stricter players.
+
+> Note: keeping full-SBS at very large dimensions (for example 7680x2160) can still exceed decoder limits on some devices even with compatible codec/pixel format settings.
 
 ## Run tests
 

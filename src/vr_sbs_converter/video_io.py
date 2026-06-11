@@ -65,6 +65,79 @@ def _nvenc_preset_from_x264(preset: str) -> str:
     return mapping.get(preset, "p4")
 
 
+def _compat_output_flags(config: ConversionConfig) -> list[str]:
+    if config.compat_profile != "strict":
+        return []
+    return [
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-movflags",
+        "+faststart",
+        "-colorspace",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+    ]
+
+
+def build_frame_writer_command(
+    output_path: Path,
+    width: int,
+    height: int,
+    fps: float,
+    config: ConversionConfig,
+    codec_override: str | None = None,
+) -> list[str]:
+    overwrite_flag = "-y" if config.overwrite else "-n"
+    codec_name = codec_override or config.codec
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        overwrite_flag,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        f"{fps:.6f}",
+        "-i",
+        "-",
+        "-an",
+    ]
+
+    if codec_name == "h264_nvenc":
+        command += [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            _nvenc_preset_from_x264(config.preset),
+            "-cq:v",
+            str(config.crf),
+            "-b:v",
+            "0",
+        ]
+    else:
+        command += [
+            "-c:v",
+            codec_name,
+            "-preset",
+            config.preset,
+            "-crf",
+            str(config.crf),
+        ]
+
+    command += _compat_output_flags(config)
+    command.append(str(output_path))
+    return command
+
+
 def open_frame_reader(input_path: Path) -> FrameStream:
     command = [
         "ffmpeg",
@@ -113,48 +186,14 @@ def open_frame_writer(
     config: ConversionConfig,
     codec_override: str | None = None,
 ) -> subprocess.Popen[bytes]:
-    overwrite_flag = "-y" if config.overwrite else "-n"
-    codec_name = codec_override or config.codec
-    command = [
-        "ffmpeg",
-        "-v",
-        "error",
-        overwrite_flag,
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "bgr24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        f"{fps:.6f}",
-        "-i",
-        "-",
-        "-an",
-    ]
-
-    if codec_name == "h264_nvenc":
-        command += [
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            _nvenc_preset_from_x264(config.preset),
-            "-cq:v",
-            str(config.crf),
-            "-b:v",
-            "0",
-        ]
-    else:
-        command += [
-            "-c:v",
-            codec_name,
-            "-preset",
-            config.preset,
-            "-crf",
-            str(config.crf),
-        ]
-
-    command.append(str(output_path))
+    command = build_frame_writer_command(
+        output_path=output_path,
+        width=width,
+        height=height,
+        fps=fps,
+        config=config,
+        codec_override=codec_override,
+    )
     return subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
@@ -183,7 +222,39 @@ def mux_audio_track(
     silent_video: Path,
     destination: Path,
     overwrite: bool,
+    audio_fallback: str = "copy-aac",
 ) -> None:
+    copy_command = build_mux_audio_command(
+        source_video=source_video,
+        silent_video=silent_video,
+        destination=destination,
+        overwrite=overwrite,
+        transcode_audio=False,
+    )
+    try:
+        run_command(copy_command)
+        return
+    except FFmpegError:
+        if audio_fallback != "copy-aac":
+            raise
+
+    fallback_command = build_mux_audio_command(
+        source_video=source_video,
+        silent_video=silent_video,
+        destination=destination,
+        overwrite=overwrite,
+        transcode_audio=True,
+    )
+    run_command(fallback_command)
+
+
+def build_mux_audio_command(
+    source_video: Path,
+    silent_video: Path,
+    destination: Path,
+    overwrite: bool,
+    transcode_audio: bool,
+) -> list[str]:
     overwrite_flag = "-y" if overwrite else "-n"
     command = [
         "ffmpeg",
@@ -200,9 +271,12 @@ def mux_audio_track(
         "1:a?",
         "-c:v",
         "copy",
-        "-c:a",
-        "copy",
         "-shortest",
-        str(destination),
     ]
-    run_command(command)
+    if transcode_audio:
+        command += ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        command += ["-c:a", "copy"]
+
+    command.append(str(destination))
+    return command

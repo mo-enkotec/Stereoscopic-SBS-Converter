@@ -74,3 +74,32 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
     assert config.max_disparity_px == 16
     assert config.depth_process_scale == 0.75
     assert config.edge_protect_strength == 0.85
+
+
+def test_build_config_defaults_to_strict_compatibility(tmp_path: Path) -> None:
+    input_file = tmp_path / "compat.mp4"
+    input_file.write_bytes(b"fake")
+    parser = build_parser()
+    args = parser.parse_args([str(input_file), "--overwrite"])
+    config = build_config(args)
+    assert config.compat_profile == "strict"
+    assert config.audio_fallback == "copy-aac"
+
+
+def test_build_config_accepts_explicit_compat_flags(tmp_path: Path) -> None:
+    input_file = tmp_path / "compat2.mp4"
+    input_file.write_bytes(b"fake")
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            str(input_file),
+            "--compat-profile",
+            "off",
+            "--audio-fallback",
+            "copy-aac",
+            "--overwrite",
+        ]
+    )
+    config = build_config(args)
+    assert config.compat_profile == "off"
+    assert config.audio_fallback == "copy-aac"

@@ -10,6 +10,8 @@ DepthBackend = Literal["auto", "midas", "luma"]
 ProfileMode = Literal["halo-safe", "balanced", "fast"]
 PerfMode = Literal["quality", "gpu-balanced", "max-speed"]
 EncoderMode = Literal["auto", "libx264", "h264_nvenc"]
+CompatProfile = Literal["strict", "off"]
+AudioFallbackMode = Literal["copy-aac"]
 
 _RESOLUTION_ALIASES = {
     "480p": 480,
@@ -37,6 +39,8 @@ class ConversionConfig:
     profile: ProfileMode = "halo-safe"
     perf_mode: PerfMode = "quality"
     encoder: EncoderMode = "auto"
+    compat_profile: CompatProfile = "strict"
+    audio_fallback: AudioFallbackMode = "copy-aac"
     max_disparity_px: int | None = None
     depth_process_scale: float | None = None
     edge_protect_strength: float | None = None
@@ -64,6 +68,10 @@ class ConversionConfig:
             raise ValueError("Invalid --perf-mode value.")
         if self.encoder not in {"auto", "libx264", "h264_nvenc"}:
             raise ValueError("Invalid --encoder value.")
+        if self.compat_profile not in {"strict", "off"}:
+            raise ValueError("Invalid --compat-profile value.")
+        if self.audio_fallback not in {"copy-aac"}:
+            raise ValueError("Invalid --audio-fallback value.")
 
         if self.max_disparity_px is None:
             self.max_disparity_px = {"halo-safe": 12, "balanced": 16, "fast": 22}[self.profile]

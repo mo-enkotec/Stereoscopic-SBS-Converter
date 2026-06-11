@@ -11,6 +11,7 @@ from typing import Iterator
 import numpy as np
 from tqdm import tqdm
 
+from .compatibility import evaluate_player_compatibility, probe_output_video_stream
 from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import ensure_ffmpeg_installed, probe_video
@@ -190,6 +191,7 @@ def run_conversion(config: ConversionConfig) -> None:
                 silent_video=silent_output,
                 destination=config.output_path,
                 overwrite=config.overwrite,
+                audio_fallback=config.audio_fallback,
             )
         else:
             if config.output_path.exists():
@@ -204,6 +206,12 @@ def run_conversion(config: ConversionConfig) -> None:
             temp_silent = config.temp_dir / "sbs_silent.mp4"
             if temp_silent.exists():
                 temp_silent.unlink()
+
+        if config.compat_profile == "strict":
+            stream_info = probe_output_video_stream(config.output_path)
+            compatibility_warnings = evaluate_player_compatibility(stream_info)
+            for warning in compatibility_warnings:
+                print(f"Compatibility warning: {warning}")
 
         if frames_processed > 0:
             fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)

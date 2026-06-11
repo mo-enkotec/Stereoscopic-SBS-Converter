@@ -64,6 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Encoder selection. 'auto' picks NVENC when available.",
     )
     parser.add_argument(
+        "--compat-profile",
+        choices=["strict", "off"],
+        default="strict",
+        help="Container/codec compatibility mode. 'strict' targets broad player support.",
+    )
+    parser.add_argument(
+        "--audio-fallback",
+        choices=["copy-aac"],
+        default="copy-aac",
+        help="Audio strategy: copy source audio, fallback to AAC when needed.",
+    )
+    parser.add_argument(
         "--max-disparity-px",
         type=int,
         help="Maximum horizontal disparity in pixels per eye. Lower values reduce halo risk.",
@@ -139,6 +151,8 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         profile=args.profile,
         perf_mode=args.perf_mode,
         encoder=args.encoder,
+        compat_profile=args.compat_profile,
+        audio_fallback=args.audio_fallback,
         max_disparity_px=args.max_disparity_px,
         depth_process_scale=args.depth_process_scale,
         edge_protect_strength=args.edge_protect_strength,
