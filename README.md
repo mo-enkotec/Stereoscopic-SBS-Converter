@@ -1,4 +1,4 @@
-# VR SBS Converter (CLI)
+# VR SBS Converter (CLI + GUI)
 
 Convert a regular 2D video into a stereoscopic side-by-side (SBS) video that can be played in VR video players.
 
@@ -31,6 +31,24 @@ pip install torch transformers
 ```
 
 ## Usage
+
+### Launch the desktop GUI
+
+```bash
+python main.py --gui
+```
+
+GUI highlights:
+
+- Dark theme with **Simple** and **Advanced** tabs.
+- File pickers for input/output.
+- Live progress + runtime status log.
+- Optional frame preview (disabled by default; can be enabled per mode).
+
+### GUI modes
+
+- **Simple**: choose one overall profile preset and basic compatibility/preview toggles.
+- **Advanced**: expose all conversion controls (SBS mode, upscale target, profile/performance, depth/stereo knobs, encoder/compatibility/audio fallback, temp handling).
 
 ### Basic conversion (2D -> full SBS)
 
