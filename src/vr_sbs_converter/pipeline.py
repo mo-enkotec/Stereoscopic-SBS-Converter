@@ -6,7 +6,7 @@ from time import perf_counter
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 from tqdm import tqdm
@@ -14,7 +14,7 @@ from tqdm import tqdm
 from .compatibility import evaluate_player_compatibility, probe_output_video_stream
 from .config import ConversionConfig
 from .depth import create_depth_estimator
-from .ffmpeg_utils import ensure_ffmpeg_installed, probe_video
+from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
 from .stereo import compose_sbs, synthesize_stereo_views
 from .upscaling import compute_target_dimensions, create_default_upscaler
 from .video_io import (
@@ -36,6 +36,22 @@ class RuntimePlan:
     depth_process_scale: float
     use_fp16: bool
     preferred_encoder: str
+
+
+class ConversionCancelledError(RuntimeError):
+    """Raised when conversion is cancelled by the user."""
+
+
+@dataclass(slots=True)
+class ConversionCallbacks:
+    on_start: Callable[[dict[str, Any]], None] | None = None
+    on_progress: Callable[[dict[str, Any]], None] | None = None
+    on_frame_preview: Callable[[np.ndarray], None] | None = None
+    on_status: Callable[[str], None] | None = None
+    on_complete: Callable[[dict[str, Any]], None] | None = None
+    should_cancel: Callable[[], bool] | None = None
+    preview_enabled: bool = False
+    preview_every_n: int = 10
 
 
 def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
@@ -93,7 +109,10 @@ def _prepare_sbs_dimensions(width: int, height: int, mode: str) -> tuple[int, in
     raise ValueError(f"Unsupported SBS mode: {mode}")
 
 
-def run_conversion(config: ConversionConfig) -> None:
+def run_conversion(
+    config: ConversionConfig,
+    callbacks: ConversionCallbacks | None = None,
+) -> None:
     ensure_ffmpeg_installed()
     runtime_plan = resolve_runtime_plan(config)
     metadata = probe_video(config.input_path)
@@ -116,11 +135,25 @@ def run_conversion(config: ConversionConfig) -> None:
     with _working_directory(config) as work_dir:
         silent_output = work_dir / "sbs_silent.mp4"
         reader = open_frame_reader(config.input_path)
+        if callbacks and callbacks.on_start:
+            callbacks.on_start(
+                {
+                    "input_path": str(config.input_path),
+                    "output_path": str(config.output_path),
+                    "total_frames": metadata.total_frames,
+                    "fps": metadata.fps,
+                    "width": metadata.width,
+                    "height": metadata.height,
+                }
+            )
         writer_codec = runtime_plan.preferred_encoder
         if writer_codec == "h264_nvenc":
             if not ffmpeg_supports_encoder("h264_nvenc") or not ffmpeg_nvenc_usable():
                 writer_codec = config.codec
-                print("h264_nvenc unavailable at runtime; falling back to CPU encoder.")
+                message = "h264_nvenc unavailable at runtime; falling back to CPU encoder."
+                print(message)
+                if callbacks and callbacks.on_status:
+                    callbacks.on_status(message)
 
         writer = open_frame_writer(
             output_path=silent_output,
@@ -145,6 +178,9 @@ def run_conversion(config: ConversionConfig) -> None:
         conversion_failed = False
         try:
             while True:
+                if callbacks and callbacks.should_cancel and callbacks.should_cancel():
+                    conversion_failed = True
+                    raise ConversionCancelledError("Conversion cancelled by user.")
                 t0 = perf_counter()
                 frame = read_raw_frame(reader, metadata.width, metadata.height)
                 decode_time += perf_counter() - t0
@@ -172,16 +208,48 @@ def run_conversion(config: ConversionConfig) -> None:
                 encode_time += perf_counter() - t3
                 frames_processed += 1
                 progress.update(1)
+                if callbacks and callbacks.on_progress:
+                    percent = (
+                        (frames_processed / metadata.total_frames) * 100.0
+                        if metadata.total_frames > 0
+                        else 0.0
+                    )
+                    callbacks.on_progress(
+                        {
+                            "frame_index": frames_processed,
+                            "total_frames": metadata.total_frames,
+                            "percent": percent,
+                            "stage": "converting",
+                        }
+                    )
+                if (
+                    callbacks
+                    and callbacks.preview_enabled
+                    and callbacks.on_frame_preview
+                    and frames_processed % max(1, callbacks.preview_every_n) == 0
+                ):
+                    callbacks.on_frame_preview(sbs_frame)
         except KeyboardInterrupt as exc:
             conversion_failed = True
-            raise RuntimeError("Conversion interrupted by user.") from exc
+            raise ConversionCancelledError("Conversion interrupted by user.") from exc
         except (BrokenPipeError, VideoIOError) as exc:
             conversion_failed = True
             raise RuntimeError(f"Frame pipeline failed: {exc}") from exc
+        except Exception:
+            conversion_failed = True
+            raise
         finally:
             progress.close()
-            close_reader(reader)
-            close_writer(writer)
+            try:
+                close_reader(reader)
+            except (FFmpegError, BrokenPipeError):
+                if not conversion_failed:
+                    raise
+            try:
+                close_writer(writer)
+            except (FFmpegError, BrokenPipeError):
+                if not conversion_failed:
+                    raise
             if conversion_failed and not config.keep_temp and silent_output.exists():
                 silent_output.unlink()
 
@@ -212,10 +280,14 @@ def run_conversion(config: ConversionConfig) -> None:
             compatibility_warnings = evaluate_player_compatibility(stream_info)
             for warning in compatibility_warnings:
                 print(f"Compatibility warning: {warning}")
+                if callbacks and callbacks.on_status:
+                    callbacks.on_status(f"Compatibility warning: {warning}")
 
+        effective_fps = 0.0
         if frames_processed > 0:
             fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)
-            print(
+            effective_fps = fps
+            summary_message = (
                 "Runtime summary: "
                 f"profile={config.profile}, perf_mode={config.perf_mode}, "
                 f"encoder={writer_codec}, depth_scale={runtime_plan.depth_process_scale:.2f}, "
@@ -224,6 +296,18 @@ def run_conversion(config: ConversionConfig) -> None:
                 f"depth_ms={depth_time * 1000 / frames_processed:.2f}, "
                 f"stereo_ms={stereo_time * 1000 / frames_processed:.2f}, "
                 f"encode_ms={encode_time * 1000 / frames_processed:.2f}"
+            )
+            print(summary_message)
+            if callbacks and callbacks.on_status:
+                callbacks.on_status(summary_message)
+        if callbacks and callbacks.on_complete:
+            callbacks.on_complete(
+                {
+                    "frames_processed": frames_processed,
+                    "effective_fps": effective_fps,
+                    "encoder": writer_codec,
+                    "output_path": str(config.output_path),
+                }
             )
 
 
