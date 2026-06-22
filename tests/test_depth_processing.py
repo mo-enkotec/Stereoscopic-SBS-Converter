@@ -35,3 +35,15 @@ def test_conditioned_depth_stays_normalized() -> None:
     conditioned = condition_depth_for_stereo(depth, guide, edge_protect_strength=0.75)
     assert float(conditioned.min()) >= 0.0
     assert float(conditioned.max()) <= 1.0
+
+
+def test_condition_depth_does_not_require_bilateral_filter(monkeypatch) -> None:
+    depth = np.linspace(0, 1, 80, dtype=np.float32).reshape(8, 10)
+    guide = np.full((8, 10, 3), 127, dtype=np.uint8)
+
+    def _fail_bilateral(*args, **kwargs):
+        raise AssertionError("bilateralFilter should not be called in optimized path")
+
+    monkeypatch.setattr(cv2, "bilateralFilter", _fail_bilateral)
+    conditioned = condition_depth_for_stereo(depth, guide, edge_protect_strength=0.75)
+    assert conditioned.shape == depth.shape

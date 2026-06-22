@@ -4,6 +4,7 @@ from pathlib import Path
 from vr_sbs_converter.config import ConversionConfig
 from vr_sbs_converter.pipeline import dry_run_example_frame
 from vr_sbs_converter.stereo import compose_sbs, synthesize_stereo_views
+import vr_sbs_converter.stereo as stereo_module
 
 
 def test_synthesize_stereo_views_shape() -> None:
@@ -57,3 +58,27 @@ def test_occlusion_aware_synthesis_limits_color_bleed() -> None:
     inner_edge_band = left_eye[22:42, 54:58]
     assert float(inner_edge_band[..., 2].mean()) > 150.0
     assert float(inner_edge_band[..., 1].mean()) < 90.0
+
+
+def test_synthesize_stereo_views_does_not_require_global_argsort(monkeypatch) -> None:
+    frame = np.full((24, 32, 3), 127, dtype=np.uint8)
+    depth = np.tile(np.linspace(0, 1, 32, dtype=np.float32), (24, 1))
+
+    def _fail_argsort(*args, **kwargs):
+        raise AssertionError("argsort should not be required in optimized stereo synthesis")
+
+    monkeypatch.setattr(np, "argsort", _fail_argsort)
+    left, right = synthesize_stereo_views(frame, depth, stereo_strength=0.8)
+    assert left.shape == frame.shape
+    assert right.shape == frame.shape
+
+
+def test_forward_warp_prefers_higher_depth_on_collision() -> None:
+    frame = np.zeros((1, 2, 3), dtype=np.uint8)
+    frame[0, 0] = (0, 0, 255)
+    frame[0, 1] = (0, 255, 0)
+    depth = np.array([[0.52, 0.51]], dtype=np.float32)
+    shifted_x = np.array([[0.0, 0.0]], dtype=np.float32)
+
+    warped = stereo_module._forward_warp_eye(frame, depth, shifted_x)
+    assert int(warped[0, 0, 2]) > int(warped[0, 0, 1])

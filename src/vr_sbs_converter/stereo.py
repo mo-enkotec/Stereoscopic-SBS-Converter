@@ -1,7 +1,38 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
+
+
+@dataclass(slots=True)
+class _StereoFrameCache:
+    x_coords_f32: np.ndarray
+    y_coords_f32: np.ndarray
+
+
+_FRAME_CACHE: dict[tuple[int, int], _StereoFrameCache] = {}
+
+
+def _get_frame_cache(width: int, height: int) -> _StereoFrameCache:
+    key = (height, width)
+    cache = _FRAME_CACHE.get(key)
+    if cache is not None:
+        return cache
+
+    x_coords = np.broadcast_to(np.arange(width, dtype=np.float32), (height, width))
+    y_coords = np.broadcast_to(
+        np.arange(height, dtype=np.float32).reshape(height, 1),
+        (height, width),
+    )
+    cache = _StereoFrameCache(
+        x_coords_f32=x_coords,
+        y_coords_f32=y_coords,
+    )
+    _FRAME_CACHE.clear()
+    _FRAME_CACHE[key] = cache
+    return cache
 
 
 def _prepare_depth(depth: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -36,41 +67,39 @@ def _forward_warp_eye(
     shifted_x: np.ndarray,
 ) -> np.ndarray:
     height, width = frame.shape[:2]
-    x_coords = np.tile(np.arange(width, dtype=np.int32), (height, 1))
-    y_coords = np.tile(np.arange(height, dtype=np.int32).reshape(height, 1), (1, width))
+    cache = _get_frame_cache(width, height)
     target_x = np.rint(shifted_x).astype(np.int32)
 
     valid = (target_x >= 0) & (target_x < width)
     if not np.any(valid):
         return frame.copy()
 
-    src_x = x_coords[valid]
-    src_y = y_coords[valid]
+    src_y, src_x = np.nonzero(valid)
     dst_x = target_x[valid]
     dst_y = src_y
-    depth_values = depth[valid]
-
-    # Render far-to-near so closer pixels overwrite farther ones.
-    order = np.argsort(depth_values, kind="stable")
+    depth_values = depth[valid].astype(np.float32, copy=False)
+    dst_linear = (dst_y.astype(np.int64) * width) + dst_x.astype(np.int64)
 
     result = np.zeros_like(frame)
-    occupied = np.zeros((height, width), dtype=bool)
-    result[dst_y[order], dst_x[order]] = frame[src_y[order], src_x[order]]
-    occupied[dst_y[order], dst_x[order]] = True
+    top_depth = np.full(height * width, -np.inf, dtype=np.float32)
+    np.maximum.at(top_depth, dst_linear, depth_values)
+    visible = depth_values >= (top_depth[dst_linear] - 1e-6)
+    result[dst_y[visible], dst_x[visible]] = frame[src_y[visible], src_x[visible]]
 
-    holes = (~occupied).astype(np.uint8) * 255
+    occupied = np.zeros((height, width), dtype=bool)
+    occupied[dst_y[visible], dst_x[visible]] = True
+
+    holes = ~occupied
     if np.any(holes):
         fallback_map = np.clip(shifted_x, 0, width - 1).astype(np.float32)
-        y_coords = np.tile(np.arange(height, dtype=np.float32).reshape(height, 1), (1, width))
         fallback = cv2.remap(
             frame,
             fallback_map,
-            y_coords,
+            cache.y_coords_f32,
             interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REPLICATE,
         )
-        mask = holes.astype(bool)
-        result[mask] = fallback[mask]
+        result[holes] = fallback[holes]
     return result
 
 
@@ -83,8 +112,9 @@ def synthesize_stereo_views(
     height, width = frame_bgr.shape[:2]
     depth = _prepare_depth(depth, width, height)
     disparity = _disparity_map(depth, width, stereo_strength, max_disparity_px)
+    cache = _get_frame_cache(width, height)
 
-    x_coords = np.tile(np.arange(width, dtype=np.float32), (height, 1))
+    x_coords = cache.x_coords_f32
 
     left_shifted_x = x_coords - (disparity * 0.5)
     right_shifted_x = x_coords + (disparity * 0.5)

@@ -59,7 +59,7 @@ def condition_depth_for_stereo(
     if edge_protect_strength <= 0:
         return normalized
 
-    smoothed = cv2.bilateralFilter(normalized, d=0, sigmaColor=0.08, sigmaSpace=5.0)
+    smoothed = cv2.GaussianBlur(normalized, (0, 0), sigmaX=1.2, sigmaY=1.2)
     edge_weight = np.clip(_edge_mask(frame_bgr) * edge_protect_strength, 0.0, 1.0)
     conditioned = (edge_weight * normalized) + ((1.0 - edge_weight) * smoothed)
     return normalize_depth_map(conditioned)
