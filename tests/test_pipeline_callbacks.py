@@ -1,11 +1,13 @@
 from pathlib import Path
 import subprocess
+import threading
 
+import numpy as np
 import pytest
 
 from vr_sbs_converter.ffmpeg_utils import FFmpegError, VideoMetadata
 from vr_sbs_converter.config import ConversionConfig
-from vr_sbs_converter.pipeline import ConversionCallbacks, run_conversion
+from vr_sbs_converter.pipeline import ConversionCallbacks, ConversionCancelledError, run_conversion
 
 
 def _make_sample_video(path: Path) -> None:
@@ -61,6 +63,10 @@ def test_run_conversion_emits_callbacks(tmp_path: Path) -> None:
     assert len(events["complete"]) == 1
     assert len(events["progress"]) > 0
     assert len(events["preview"]) > 0
+    assert {"input_path", "output_path", "total_frames", "fps", "width", "height"} <= set(events["start"][0].keys())
+    assert {"frame_index", "total_frames", "percent", "stage"} <= set(events["progress"][0].keys())
+    assert {"frames_processed", "effective_fps", "encoder", "output_path"} <= set(events["complete"][0].keys())
+    assert any("Runtime summary:" in message for message in events["status"])
 
 
 def test_run_conversion_honors_cancel_callback(tmp_path: Path) -> None:
@@ -172,3 +178,341 @@ def test_cancelled_conversion_not_overridden_by_close_errors(monkeypatch, tmp_pa
 
     with pytest.raises(RuntimeError, match="cancelled"):
         run_conversion(config, callbacks=callbacks)
+
+
+def test_run_conversion_routes_default_to_parallel_orchestrator(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        def estimate(self, frame):
+            return frame
+
+    parallel_calls: list[dict] = []
+
+    def _fake_parallel(**kwargs):
+        parallel_calls.append(kwargs)
+        return {"frames_written": 0, "all_workers_joined": True, "failure": None, "cancel_requested": False}
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=16,
+            height=16,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=0,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.run_parallel_conversion_configured", _fake_parallel, raising=False)
+
+    complete_events: list[dict] = []
+    callbacks = ConversionCallbacks(on_complete=lambda payload: complete_events.append(payload))
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+    run_conversion(config, callbacks=callbacks)
+
+    assert len(parallel_calls) == 1
+    assert len(complete_events) == 1
+    assert complete_events[0]["frames_processed"] == 0
+
+
+def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        def estimate(self, frame):
+            return np.ones(frame.shape[:2], dtype=np.float32)
+
+    backend_calls: list[str] = []
+    selected_backends: list[str] = []
+
+    class _FakeBackend:
+        name = "torch-cuda"
+
+        @staticmethod
+        def synthesize(frame_bgr, depth, stereo_strength, max_disparity_px):
+            _ = depth, stereo_strength, max_disparity_px
+            backend_calls.append("torch-cuda")
+            return frame_bgr, frame_bgr
+
+    def _fake_select_backend(device_preference: str, **_kwargs):
+        selected_backends.append(device_preference)
+        return _FakeBackend()
+
+    def _fake_parallel(**kwargs):
+        sample = np.zeros((8, 8, 3), dtype=np.uint8)
+        left_eye, right_eye = kwargs["synthesize_stereo"](sample, np.ones((8, 8), dtype=np.float32))
+        sbs_frame = kwargs["compose_sbs"]((left_eye, right_eye))
+        kwargs["write_frame"](0, sbs_frame)
+        return {"frames_written": 1, "all_workers_joined": True, "failure": None, "cancel_requested": False}
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=8,
+            height=8,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=1,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.read_raw_frame",
+        lambda *_args, **_kwargs: next(frames),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.select_stereo_synthesis_backend",
+        _fake_select_backend,
+        raising=False,
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.run_parallel_conversion_configured", _fake_parallel, raising=False)
+
+    frames = iter([np.zeros((8, 8, 3), dtype=np.uint8), None])
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        device="cuda",
+        overwrite=True,
+        compat_profile="off",
+    )
+    run_conversion(config)
+
+    assert selected_backends == ["cuda"]
+    assert backend_calls == ["torch-cuda"]
+
+
+def test_run_conversion_parallel_cancel_does_not_emit_complete(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        def estimate(self, frame):
+            return frame
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=16,
+            height=16,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=0,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.run_parallel_conversion_configured",
+        lambda **_kwargs: (_ for _ in ()).throw(ConversionCancelledError("Conversion cancelled by user.")),
+        raising=False,
+    )
+
+    complete_events: list[dict] = []
+    callbacks = ConversionCallbacks(on_complete=lambda payload: complete_events.append(payload))
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        run_conversion(config, callbacks=callbacks)
+    assert complete_events == []
+
+
+def test_run_conversion_parallel_callbacks_stay_on_caller_thread(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        @staticmethod
+        def estimate(frame):
+            return np.ones(frame.shape[:2], dtype=np.float32)
+
+    class _FakeBackend:
+        @staticmethod
+        def synthesize(frame_bgr, depth, stereo_strength, max_disparity_px):
+            _ = depth, stereo_strength, max_disparity_px
+            return frame_bgr, frame_bgr
+
+    frames = iter([np.zeros((8, 8, 3), dtype=np.uint8), None])
+    main_thread_id = threading.get_ident()
+    progress_thread_ids: list[int] = []
+    progress_events: list[dict[str, float | int | str | None]] = []
+    preview_thread_ids: list[int] = []
+    preview_shapes: list[tuple[int, ...]] = []
+    cancel_thread_ids: list[int] = []
+    complete_thread_ids: list[int] = []
+    complete_events: list[dict] = []
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=8,
+            height=8,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=1,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.read_raw_frame",
+        lambda *_args, **_kwargs: next(frames),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.select_stereo_synthesis_backend",
+        lambda _device, **_kwargs: _FakeBackend(),
+        raising=False,
+    )
+
+    callbacks = ConversionCallbacks(
+        on_progress=lambda payload: (
+            progress_thread_ids.append(threading.get_ident()),
+            progress_events.append(payload),
+        ),
+        on_frame_preview=lambda frame: (
+            preview_thread_ids.append(threading.get_ident()),
+            preview_shapes.append(frame.shape),
+        ),
+        should_cancel=lambda: cancel_thread_ids.append(threading.get_ident()) or False,
+        on_complete=lambda payload: (
+            complete_thread_ids.append(threading.get_ident()),
+            complete_events.append(payload),
+        ),
+        preview_enabled=True,
+        preview_every_n=1,
+    )
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+
+    run_conversion(config, callbacks=callbacks)
+
+    assert progress_thread_ids
+    assert preview_thread_ids
+    assert cancel_thread_ids
+    assert set(progress_thread_ids) == {main_thread_id}
+    assert set(preview_thread_ids) == {main_thread_id}
+    assert set(cancel_thread_ids) == {main_thread_id}
+    assert set(complete_thread_ids) == {main_thread_id}
+    assert {"frame_index", "total_frames", "percent", "stage"} <= set(progress_events[0].keys())
+    assert progress_events[0]["stage"] == "converting"
+    assert preview_shapes == [(8, 16, 3)]
+    assert {"frames_processed", "effective_fps", "encoder", "output_path"} <= set(complete_events[0].keys())
+
+
+def test_run_conversion_parallel_effective_fps_uses_wall_clock(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        @staticmethod
+        def estimate(frame):
+            return frame
+
+    perf_ticks = [100.0, 102.0]
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=16,
+            height=16,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=4,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.run_parallel_conversion_configured",
+        lambda **_kwargs: {
+            "frames_written": 4,
+            "all_workers_joined": True,
+            "failure": None,
+            "cancel_requested": False,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.perf_counter",
+        lambda: perf_ticks.pop(0) if perf_ticks else 102.0,
+    )
+
+    status_events: list[str] = []
+    complete_events: list[dict] = []
+    callbacks = ConversionCallbacks(
+        on_status=lambda message: status_events.append(message),
+        on_complete=lambda payload: complete_events.append(payload),
+    )
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+
+    run_conversion(config, callbacks=callbacks)
+
+    assert len(complete_events) == 1
+    assert complete_events[0]["frames_processed"] == 4
+    assert complete_events[0]["effective_fps"] == pytest.approx(2.0)
+    assert any("effective_fps=2.00" in message for message in status_events)

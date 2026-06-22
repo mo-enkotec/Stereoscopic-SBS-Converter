@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import Lock
 from time import perf_counter
 import shutil
 import tempfile
@@ -15,7 +16,9 @@ from .compatibility import evaluate_player_compatibility, probe_output_video_str
 from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
+from .pipeline_parallel import run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
+from .stereo_torch import select_stereo_synthesis_backend
 from .upscaling import compute_target_dimensions, create_default_upscaler
 from .video_io import (
     VideoIOError,
@@ -112,6 +115,8 @@ def _prepare_sbs_dimensions(width: int, height: int, mode: str) -> tuple[int, in
 def run_conversion(
     config: ConversionConfig,
     callbacks: ConversionCallbacks | None = None,
+    *,
+    use_parallel: bool = True,
 ) -> None:
     ensure_ffmpeg_installed()
     runtime_plan = resolve_runtime_plan(config)
@@ -176,24 +181,38 @@ def run_conversion(
         encode_time = 0.0
         frames_processed = 0
         conversion_failed = False
-        try:
+        processing_elapsed = 0.0
+        timing_lock = Lock()
+
+        def _emit_preview(frame_payload: np.ndarray) -> None:
+            if (
+                callbacks
+                and callbacks.preview_enabled
+                and callbacks.on_frame_preview
+                and frames_processed % max(1, callbacks.preview_every_n) == 0
+            ):
+                callbacks.on_frame_preview(frame_payload)
+
+        def _run_sequential_frames() -> None:
+            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed
             while True:
                 if callbacks and callbacks.should_cancel and callbacks.should_cancel():
-                    conversion_failed = True
                     raise ConversionCancelledError("Conversion cancelled by user.")
-                t0 = perf_counter()
+                decode_started = perf_counter()
                 frame = read_raw_frame(reader, metadata.width, metadata.height)
-                decode_time += perf_counter() - t0
+                with timing_lock:
+                    decode_time += perf_counter() - decode_started
                 if frame is None:
                     break
                 if upscaler is not None:
                     frame = upscaler.upscale(frame, process_width, process_height)
 
-                t1 = perf_counter()
+                depth_started = perf_counter()
                 depth = depth_estimator.estimate(frame)
-                depth_time += perf_counter() - t1
+                with timing_lock:
+                    depth_time += perf_counter() - depth_started
 
-                t2 = perf_counter()
+                stereo_started = perf_counter()
                 left_eye, right_eye = synthesize_stereo_views(
                     frame_bgr=frame,
                     depth=depth,
@@ -201,11 +220,13 @@ def run_conversion(
                     max_disparity_px=config.max_disparity_px,
                 )
                 sbs_frame = compose_sbs(left_eye, right_eye, config.sbs_mode)
-                stereo_time += perf_counter() - t2
+                with timing_lock:
+                    stereo_time += perf_counter() - stereo_started
 
-                t3 = perf_counter()
+                encode_started = perf_counter()
                 write_raw_frame(writer, sbs_frame)
-                encode_time += perf_counter() - t3
+                with timing_lock:
+                    encode_time += perf_counter() - encode_started
                 frames_processed += 1
                 progress.update(1)
                 if callbacks and callbacks.on_progress:
@@ -222,13 +243,90 @@ def run_conversion(
                             "stage": "converting",
                         }
                     )
-                if (
-                    callbacks
-                    and callbacks.preview_enabled
-                    and callbacks.on_frame_preview
-                    and frames_processed % max(1, callbacks.preview_every_n) == 0
-                ):
-                    callbacks.on_frame_preview(sbs_frame)
+                _emit_preview(sbs_frame)
+
+        def _run_parallel_frames() -> None:
+            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed
+
+            stereo_backend = select_stereo_synthesis_backend(config.device)
+
+            def _read_frame() -> np.ndarray | None:
+                nonlocal decode_time
+                decode_started = perf_counter()
+                frame_payload = read_raw_frame(reader, metadata.width, metadata.height)
+                with timing_lock:
+                    decode_time += perf_counter() - decode_started
+                if frame_payload is not None and upscaler is not None:
+                    frame_payload = upscaler.upscale(frame_payload, process_width, process_height)
+                return frame_payload
+
+            def _estimate_depth(frame_payload: np.ndarray) -> np.ndarray:
+                nonlocal depth_time
+                depth_started = perf_counter()
+                depth_payload = depth_estimator.estimate(frame_payload)
+                with timing_lock:
+                    depth_time += perf_counter() - depth_started
+                return depth_payload
+
+            def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                nonlocal stereo_time
+                stereo_started = perf_counter()
+                stereo_payload = stereo_backend.synthesize(
+                    frame_payload,
+                    depth_payload,
+                    config.stereo_strength,
+                    config.max_disparity_px,
+                )
+                with timing_lock:
+                    stereo_time += perf_counter() - stereo_started
+                return stereo_payload
+
+            def _compose_sbs(stereo_payload: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+                nonlocal stereo_time
+                compose_started = perf_counter()
+                left_eye, right_eye = stereo_payload
+                sbs_frame_payload = compose_sbs(left_eye, right_eye, config.sbs_mode)
+                with timing_lock:
+                    stereo_time += perf_counter() - compose_started
+                return sbs_frame_payload
+
+            def _write_frame(_frame_index: int, sbs_frame_payload: np.ndarray) -> None:
+                nonlocal encode_time, frames_processed
+                encode_started = perf_counter()
+                write_raw_frame(writer, sbs_frame_payload)
+                with timing_lock:
+                    encode_time += perf_counter() - encode_started
+                frames_processed += 1
+                progress.update(1)
+                _emit_preview(sbs_frame_payload)
+
+            parallel_callbacks = None
+            if callbacks is not None:
+                parallel_callbacks = ConversionCallbacks(
+                    on_progress=callbacks.on_progress,
+                    should_cancel=callbacks.should_cancel,
+                )
+
+            parallel_result = run_parallel_conversion_configured(
+                read_frame=_read_frame,
+                estimate_depth=_estimate_depth,
+                synthesize_stereo=_synthesize_stereo,
+                compose_sbs=_compose_sbs,
+                write_frame=_write_frame,
+                callbacks=parallel_callbacks,
+                total_frames=metadata.total_frames,
+            )
+            frames_processed = max(
+                frames_processed,
+                int(parallel_result.get("frames_written", frames_processed)),
+            )
+
+        processing_started = perf_counter()
+        try:
+            if use_parallel:
+                _run_parallel_frames()
+            else:
+                _run_sequential_frames()
         except KeyboardInterrupt as exc:
             conversion_failed = True
             raise ConversionCancelledError("Conversion interrupted by user.") from exc
@@ -239,6 +337,7 @@ def run_conversion(
             conversion_failed = True
             raise
         finally:
+            processing_elapsed = perf_counter() - processing_started
             progress.close()
             try:
                 close_reader(reader)
@@ -285,7 +384,10 @@ def run_conversion(
 
         effective_fps = 0.0
         if frames_processed > 0:
-            fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)
+            if use_parallel:
+                fps = frames_processed / max(1e-6, processing_elapsed)
+            else:
+                fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)
             effective_fps = fps
             summary_message = (
                 "Runtime summary: "
