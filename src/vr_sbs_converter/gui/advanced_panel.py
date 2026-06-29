@@ -73,9 +73,6 @@ class AdvancedPanel(QWidget):
         self.keep_temp = QCheckBox("Keep temporary files")
         self.temp_dir = QLineEdit()
 
-        self.frame_preview = QCheckBox("Show frame preview")
-        self.frame_preview.setChecked(False)
-
         layout.addRow("SBS mode", self.sbs_mode)
         layout.addRow("", self.upscale)
         layout.addRow("Target height", self.target_height)
@@ -96,7 +93,6 @@ class AdvancedPanel(QWidget):
         layout.addRow("", self.overwrite)
         layout.addRow("", self.keep_temp)
         layout.addRow("Temp directory", self.temp_dir)
-        layout.addRow("", self.frame_preview)
 
     def get_state(self) -> dict[str, object]:
         temp_dir_value = self.temp_dir.text().strip()
@@ -121,6 +117,4 @@ class AdvancedPanel(QWidget):
             "overwrite": self.overwrite.isChecked(),
             "keep_temp": self.keep_temp.isChecked(),
             "temp_dir": Path(temp_dir_value).expanduser() if temp_dir_value else None,
-            "frame_preview_enabled": self.frame_preview.isChecked(),
         }
-

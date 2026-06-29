@@ -43,11 +43,11 @@ GUI highlights:
 - Dark theme with **Simple** and **Advanced** tabs.
 - File pickers for input/output.
 - Live progress + runtime status log.
-- Optional frame preview (disabled by default; can be enabled per mode).
+- Preset-driven simple mode and full-control advanced mode.
 
 ### GUI modes
 
-- **Simple**: choose one overall profile preset and basic compatibility/preview toggles.
+- **Simple**: choose one overall profile preset and a strict compatibility toggle.
 - **Advanced**: expose all conversion controls (SBS mode, upscale target, profile/performance, depth/stereo knobs, encoder/compatibility/audio fallback, temp handling).
 
 ### Basic conversion (2D -> full SBS)

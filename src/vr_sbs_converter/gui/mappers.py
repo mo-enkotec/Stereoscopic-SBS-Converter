@@ -28,13 +28,11 @@ def build_simple_config(
     input_path: Path,
     output_path: Path,
     preset_key: str,
-    frame_preview_enabled: bool,
 ) -> ConversionConfig:
     if preset_key not in SIMPLE_PRESETS:
         raise ValueError(f"Unknown simple preset '{preset_key}'.")
 
     preset = SIMPLE_PRESETS[preset_key]
-    _ = frame_preview_enabled
     return ConversionConfig(
         input_path=input_path,
         output_path=output_path,
@@ -82,4 +80,3 @@ def build_advanced_config(
         if key in allowed_keys and value is not None:
             payload[key] = value
     return ConversionConfig(**payload)
-

@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import numpy as np
-
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
@@ -25,7 +23,6 @@ def test_worker_emits_callback_signals(monkeypatch) -> None:
     captured: dict[str, list] = {
         "start": [],
         "progress": [],
-        "preview": [],
         "status": [],
         "finished": [],
         "failed": [],
@@ -33,12 +30,12 @@ def test_worker_emits_callback_signals(monkeypatch) -> None:
 
     def fake_run_conversion(_config, callbacks=None) -> None:
         assert callbacks is not None
+        assert callbacks.on_frame_preview is None
+        assert callbacks.preview_enabled is False
         if callbacks.on_start:
             callbacks.on_start({"total_frames": 5})
         if callbacks.on_progress:
             callbacks.on_progress({"frame_index": 1, "total_frames": 5, "percent": 20.0, "stage": "converting"})
-        if callbacks.on_frame_preview:
-            callbacks.on_frame_preview(np.zeros((10, 20, 3), dtype=np.uint8))
         if callbacks.on_status:
             callbacks.on_status("runtime summary")
         if callbacks.on_complete:
@@ -46,22 +43,16 @@ def test_worker_emits_callback_signals(monkeypatch) -> None:
 
     monkeypatch.setattr("vr_sbs_converter.gui.worker.run_conversion", fake_run_conversion)
 
-    worker = ConversionWorker(
-        ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")),
-        preview_enabled=True,
-    )
+    worker = ConversionWorker(ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")))
     worker.started.connect(lambda payload: captured["start"].append(payload))
     worker.progress.connect(lambda payload: captured["progress"].append(payload))
-    worker.preview_frame.connect(lambda frame: captured["preview"].append(frame.shape))
     worker.status.connect(lambda message: captured["status"].append(message))
     worker.finished.connect(lambda payload: captured["finished"].append(payload))
     worker.failed.connect(lambda message: captured["failed"].append(message))
 
     worker.run()
-
     assert len(captured["start"]) == 1
     assert len(captured["progress"]) == 1
-    assert captured["preview"] == [(10, 20, 3)]
     assert captured["status"] == ["runtime summary"]
     assert len(captured["finished"]) == 1
     assert captured["failed"] == []
@@ -77,10 +68,7 @@ def test_worker_emits_failed_signal_on_exception(monkeypatch) -> None:
 
     monkeypatch.setattr("vr_sbs_converter.gui.worker.run_conversion", fake_run_conversion)
 
-    worker = ConversionWorker(
-        ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")),
-        preview_enabled=False,
-    )
+    worker = ConversionWorker(ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")))
     worker.failed.connect(captured.append)
 
     worker.run()
@@ -98,10 +86,7 @@ def test_worker_emits_canceled_signal_on_cancel_exception(monkeypatch) -> None:
 
     monkeypatch.setattr("vr_sbs_converter.gui.worker.run_conversion", fake_run_conversion)
 
-    worker = ConversionWorker(
-        ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")),
-        preview_enabled=False,
-    )
+    worker = ConversionWorker(ConversionConfig(input_path=Path("/tmp/in.mp4"), output_path=Path("/tmp/out.mp4")))
     worker.canceled.connect(lambda: captured.append("cancelled"))
 
     worker.run()

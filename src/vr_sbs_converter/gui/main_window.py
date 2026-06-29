@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 
-import cv2
-import numpy as np
-from PySide6.QtCore import QThread, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -62,20 +60,15 @@ class MainWindow(QMainWindow):
         self._log_output.setReadOnly(True)
         self._log_output.setPlaceholderText("Runtime status and warnings will appear here.")
 
-        self._preview_label = QLabel("Frame preview disabled")
-        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setMinimumHeight(220)
-        self._preview_label.setStyleSheet("border: 1px solid #2A2A2A; border-radius: 4px;")
-
         self._thread: QThread | None = None
         self._worker: ConversionWorker | None = None
+        self._conversion_started_at: float | None = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.addLayout(self._build_path_row("Input video", self._input_edit, self._input_browse_button))
         layout.addLayout(self._build_path_row("Output video", self._output_edit, self._output_browse_button))
         layout.addWidget(self._tabs)
-        layout.addWidget(self._preview_label)
         layout.addWidget(self._log_output)
         controls = QHBoxLayout()
         controls.addWidget(self._start_button)
@@ -97,10 +90,9 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select input video")
         if file_path:
             self._input_edit.setText(file_path)
-            if not self._output_edit.text().strip():
-                input_path = Path(file_path)
-                stem = input_path.stem
-                self._output_edit.setText(str(input_path.with_name(f"{stem}_sbs.mp4")))
+            input_path = Path(file_path)
+            stem = input_path.stem
+            self._output_edit.setText(str(input_path.with_name(f"{stem}_sbs.mp4")))
 
     def _pick_output_file(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(self, "Select output path", filter="Video files (*.mp4)")
@@ -116,23 +108,16 @@ class MainWindow(QMainWindow):
                 input_path=input_path,
                 output_path=output_path,
                 preset_key=str(state["preset_key"]),
-                frame_preview_enabled=bool(state["frame_preview_enabled"]),
             )
             config.compat_profile = str(state["compat_profile"])
             return config
 
         advanced_state = self._advanced_panel.get_state()
-        advanced_options = {k: v for k, v in advanced_state.items() if k != "frame_preview_enabled"}
         return build_advanced_config(
             input_path=input_path,
             output_path=output_path,
-            options=advanced_options,
+            options=advanced_state,
         )
-
-    def _current_preview_enabled(self) -> bool:
-        if self._tabs.currentIndex() == 0:
-            return bool(self._simple_panel.get_state()["frame_preview_enabled"])
-        return bool(self._advanced_panel.get_state()["frame_preview_enabled"])
 
     def _start_conversion(self) -> None:
         if self._thread is not None:
@@ -151,9 +136,7 @@ class MainWindow(QMainWindow):
             return
 
         config = self.build_config_from_ui()
-        preview_enabled = self._current_preview_enabled()
-
-        self._worker = ConversionWorker(config=config, preview_enabled=preview_enabled)
+        self._worker = ConversionWorker(config=config)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
 
@@ -161,7 +144,6 @@ class MainWindow(QMainWindow):
         self._worker.started.connect(self._on_worker_started)
         self._worker.progress.connect(self._on_worker_progress)
         self._worker.status.connect(self._append_status)
-        self._worker.preview_frame.connect(self._on_preview_frame)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.failed.connect(self._on_worker_failed)
         self._worker.canceled.connect(self._on_worker_canceled)
@@ -175,7 +157,7 @@ class MainWindow(QMainWindow):
         self._cancel_button.setEnabled(True)
         self._progress_bar.setValue(0)
         self._status_label.setText("Starting conversion...")
-        self._preview_label.setText("Frame preview enabled." if preview_enabled else "Frame preview disabled")
+        self._conversion_started_at = perf_counter()
         self._thread.start()
 
     def _cancel_conversion(self) -> None:
@@ -186,6 +168,8 @@ class MainWindow(QMainWindow):
         self._worker.cancel()
 
     def _on_worker_started(self, payload: dict[str, object]) -> None:
+        if self._conversion_started_at is None:
+            self._conversion_started_at = perf_counter()
         total_frames = payload.get("total_frames", 0)
         self._append_status(f"Started conversion ({total_frames} frames).")
         self._status_label.setText("Converting...")
@@ -193,23 +177,17 @@ class MainWindow(QMainWindow):
     def _on_worker_progress(self, payload: dict[str, object]) -> None:
         percent = int(float(payload.get("percent", 0.0)))
         self._progress_bar.setValue(max(0, min(100, percent)))
-        frame_index = payload.get("frame_index", 0)
-        total_frames = payload.get("total_frames", 0)
-        self._status_label.setText(f"Converting frame {frame_index}/{total_frames}")
-
-    def _on_preview_frame(self, frame: np.ndarray) -> None:
-        if not self._current_preview_enabled():
-            return
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
-        bytes_per_line = channels * width
-        image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(image).scaled(
-            self._preview_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview_label.setPixmap(pixmap)
+        frame_index = int(payload.get("frame_index", 0))
+        total_frames = int(payload.get("total_frames", 0))
+        eta_seconds: float | None = None
+        if self._conversion_started_at is not None and total_frames > 0 and frame_index > 0:
+            elapsed = max(0.0, perf_counter() - self._conversion_started_at)
+            progress_fraction = min(1.0, frame_index / total_frames)
+            if progress_fraction > 0:
+                estimated_total = elapsed / progress_fraction
+                eta_seconds = max(0.0, estimated_total - elapsed)
+        eta_text = self._format_eta(eta_seconds)
+        self._status_label.setText(f"Converting frame {frame_index}/{total_frames} • ETA {eta_text}")
 
     def _on_worker_finished(self, payload: dict[str, object]) -> None:
         output_path = payload.get("output_path", "")
@@ -232,8 +210,20 @@ class MainWindow(QMainWindow):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self._conversion_started_at = None
         self._start_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
 
     def _append_status(self, message: str) -> None:
         self._log_output.append(message)
+
+    @staticmethod
+    def _format_eta(remaining_seconds: float | None) -> str:
+        if remaining_seconds is None:
+            return "--:--"
+        remaining = max(0, int(remaining_seconds))
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours:02}:{minutes:02}:{seconds:02}"
+        return f"{minutes:02}:{seconds:02}"

@@ -17,17 +17,11 @@ class SimplePanel(QWidget):
         self.compat_strict_checkbox = QCheckBox("Use strict playback compatibility")
         self.compat_strict_checkbox.setChecked(True)
 
-        self.frame_preview_checkbox = QCheckBox("Show frame preview during conversion")
-        self.frame_preview_checkbox.setChecked(False)
-
         layout.addRow("Overall profile", self.preset_combo)
         layout.addRow("", self.compat_strict_checkbox)
-        layout.addRow("", self.frame_preview_checkbox)
 
     def get_state(self) -> dict[str, object]:
         return {
             "preset_key": self.preset_combo.currentData(),
             "compat_profile": "strict" if self.compat_strict_checkbox.isChecked() else "off",
-            "frame_preview_enabled": self.frame_preview_checkbox.isChecked(),
         }
-

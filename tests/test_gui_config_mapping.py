@@ -1,10 +1,24 @@
+import os
 from pathlib import Path
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+
+from vr_sbs_converter.gui.advanced_panel import AdvancedPanel
 from vr_sbs_converter.gui.mappers import (
     SIMPLE_PRESETS,
     build_advanced_config,
     build_simple_config,
 )
+from vr_sbs_converter.gui.simple_panel import SimplePanel
+
+
+def _ensure_app() -> QApplication:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
 
 
 def test_build_simple_config_uses_preset_mapping() -> None:
@@ -12,7 +26,6 @@ def test_build_simple_config_uses_preset_mapping() -> None:
         input_path=Path("/tmp/in.mp4"),
         output_path=Path("/tmp/out.mp4"),
         preset_key="quality-safe",
-        frame_preview_enabled=False,
     )
     assert config.profile == SIMPLE_PRESETS["quality-safe"]["profile"]
     assert config.perf_mode == SIMPLE_PRESETS["quality-safe"]["perf_mode"]
@@ -45,3 +58,21 @@ def test_build_advanced_config_honors_option_overrides() -> None:
     assert config.encoder == "h264_nvenc"
     assert config.depth_backend == "luma"
     assert config.device == "cuda"
+
+
+def test_simple_panel_state_does_not_include_frame_preview_flag() -> None:
+    _ensure_app()
+    panel = SimplePanel()
+
+    state = panel.get_state()
+
+    assert "frame_preview_enabled" not in state
+
+
+def test_advanced_panel_state_does_not_include_frame_preview_flag() -> None:
+    _ensure_app()
+    panel = AdvancedPanel()
+
+    state = panel.get_state()
+
+    assert "frame_preview_enabled" not in state
