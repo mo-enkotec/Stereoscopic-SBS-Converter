@@ -648,6 +648,78 @@ def test_run_conversion_parallel_effective_fps_uses_wall_clock(monkeypatch, tmp_
     assert any("effective_fps=2.00" in message for message in status_events)
 
 
+def test_run_conversion_live_top5_does_not_burst_when_callbacks_are_sparse(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    class _DummyEstimator:
+        @staticmethod
+        def estimate(frame):
+            return frame
+
+    tick = {"count": 0}
+
+    def _fake_perf_counter() -> float:
+        tick["count"] += 1
+        if tick["count"] <= 2:
+            return 0.0
+        return 10.0 + (tick["count"] - 3) * 0.1
+
+    def _fake_parallel(**kwargs):
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        kwargs["write_frame"](0, frame)
+        progress_cb = kwargs["callbacks"].on_progress
+        assert progress_cb is not None
+        for frame_index in (1, 2, 3, 4):
+            progress_cb(
+                {
+                    "frame_index": frame_index,
+                    "total_frames": 4,
+                    "percent": frame_index * 25.0,
+                    "stage": "converting",
+                }
+            )
+        return {"frames_written": 4, "all_workers_joined": True, "failure": None, "cancel_requested": False}
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=8,
+            height=8,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=4,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.perf_counter", _fake_perf_counter)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.run_parallel_conversion_configured", _fake_parallel, raising=False)
+
+    status_events: list[str] = []
+    callbacks = ConversionCallbacks(on_status=lambda message: status_events.append(message))
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+    run_conversion(config, callbacks=callbacks)
+
+    live_top5_events = [message for message in status_events if "Function timing top-5:" in message]
+    assert len(live_top5_events) == 1
+
+
 def test_run_conversion_auto_resumes_from_saved_checkpoint(monkeypatch, tmp_path: Path) -> None:
     input_video = tmp_path / "in.mp4"
     output_video = tmp_path / "out.mp4"
@@ -721,3 +793,61 @@ def test_run_conversion_auto_resumes_from_saved_checkpoint(monkeypatch, tmp_path
     assert reloaded is not None
     assert reloaded.status == "complete"
     assert reloaded.next_frame_index == 4
+
+
+def test_run_conversion_emits_live_top5_function_stats_during_run(monkeypatch, tmp_path: Path) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    frames = iter([frame, frame, frame, frame, None])
+    status_events: list[str] = []
+
+    class _DummyEstimator:
+        @staticmethod
+        def estimate(_frame):
+            return np.ones((8, 8), dtype=np.float32)
+
+    now = 0.0
+
+    def _fake_perf_counter() -> float:
+        nonlocal now
+        now += 0.5
+        return now
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=8,
+            height=8,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=4,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.read_raw_frame", lambda *_args, **_kwargs: next(frames))
+    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.perf_counter", _fake_perf_counter)
+
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        overwrite=True,
+        compat_profile="off",
+    )
+    callbacks = ConversionCallbacks(on_status=lambda message: status_events.append(message))
+    run_conversion(config, callbacks=callbacks, use_parallel=False)
+
+    assert any("Function timing top-5:" in message for message in status_events)
+    assert any("Function timing summary:" in message for message in status_events)

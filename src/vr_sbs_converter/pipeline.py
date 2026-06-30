@@ -28,6 +28,7 @@ from .compatibility import evaluate_player_compatibility, probe_output_video_str
 from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
+from .perf_stats import FunctionTimingCollector, format_function_timing_top
 from .pipeline_parallel import DepthFramePayload, ParallelQueueConfig, run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
 from .stereo_torch import select_stereo_synthesis_backend, synthesize_stereo_views_torch_batch
@@ -319,6 +320,9 @@ def run_conversion(
         conversion_canceled = False
         eta_started: float | None = None
         conversion_started = perf_counter()
+        function_timing = FunctionTimingCollector()
+        live_top5_report_interval_seconds = 2.0
+        next_live_top5_report_seconds = live_top5_report_interval_seconds
 
         def _progress_timing(frame_index: int) -> tuple[float, float, int | None, float | None]:
             if eta_started is None:
@@ -343,11 +347,22 @@ def run_conversion(
                 eta_seconds = None
             return elapsed_seconds, processing_fps, remaining_frames, eta_seconds
 
+        def _maybe_emit_live_top5(elapsed_seconds: float) -> None:
+            nonlocal next_live_top5_report_seconds
+            if callbacks is None or callbacks.on_status is None:
+                return
+            if elapsed_seconds < next_live_top5_report_seconds:
+                return
+            top_entries = function_timing.snapshot_top_n(5)
+            if top_entries:
+                callbacks.on_status(f"Function timing top-5: {format_function_timing_top(top_entries)}")
+            elapsed_intervals = int(elapsed_seconds // live_top5_report_interval_seconds)
+            next_live_top5_report_seconds = (elapsed_intervals + 1) * live_top5_report_interval_seconds
+
         def _emit_progress(frame_index: int, stage: str = "converting") -> None:
+            elapsed_seconds, processing_fps, remaining_frames, eta_seconds = _progress_timing(frame_index)
+            _maybe_emit_live_top5(elapsed_seconds)
             if callbacks and callbacks.on_progress:
-                elapsed_seconds, processing_fps, remaining_frames, eta_seconds = _progress_timing(
-                    frame_index
-                )
                 percent = (
                     (frame_index / metadata.total_frames) * 100.0
                     if metadata.total_frames > 0
@@ -396,17 +411,23 @@ def run_conversion(
                     raise ConversionCancelledError("Conversion cancelled by user.")
                 decode_started = perf_counter()
                 frame = read_raw_frame(reader, metadata.width, metadata.height)
+                decode_elapsed = perf_counter() - decode_started
+                function_timing.record("read_raw_frame", decode_elapsed * 1000.0)
                 with timing_lock:
-                    decode_time += perf_counter() - decode_started
+                    decode_time += decode_elapsed
                 if frame is None:
                     break
                 if upscaler is not None:
+                    upscale_started = perf_counter()
                     frame = upscaler.upscale(frame, process_width, process_height)
+                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
 
                 depth_started = perf_counter()
                 depth = depth_estimator.estimate(frame)
+                depth_elapsed = perf_counter() - depth_started
+                function_timing.record("depth_estimate", depth_elapsed * 1000.0)
                 with timing_lock:
-                    depth_time += perf_counter() - depth_started
+                    depth_time += depth_elapsed
 
                 stereo_started = perf_counter()
                 left_eye, right_eye = synthesize_stereo_views(
@@ -415,14 +436,21 @@ def run_conversion(
                     stereo_strength=config.stereo_strength,
                     max_disparity_px=config.max_disparity_px,
                 )
+                stereo_elapsed = perf_counter() - stereo_started
+                function_timing.record("stereo_synthesize", stereo_elapsed * 1000.0)
+                compose_started = perf_counter()
                 sbs_frame = compose_sbs(left_eye, right_eye, config.sbs_mode)
+                compose_elapsed = perf_counter() - compose_started
+                function_timing.record("compose_sbs", compose_elapsed * 1000.0)
                 with timing_lock:
-                    stereo_time += perf_counter() - stereo_started
+                    stereo_time += stereo_elapsed + compose_elapsed
 
                 encode_started = perf_counter()
                 write_raw_frame(writer, sbs_frame)
+                encode_elapsed = perf_counter() - encode_started
+                function_timing.record("write_raw_frame", encode_elapsed * 1000.0)
                 with timing_lock:
-                    encode_time += perf_counter() - encode_started
+                    encode_time += encode_elapsed
                 frames_processed += 1
                 frames_processed_this_run += 1
                 progress.update(1)
@@ -486,18 +514,24 @@ def run_conversion(
                 nonlocal decode_time
                 decode_started = perf_counter()
                 frame_payload = read_raw_frame(reader, metadata.width, metadata.height)
+                decode_elapsed = perf_counter() - decode_started
+                function_timing.record("read_raw_frame", decode_elapsed * 1000.0)
                 with timing_lock:
-                    decode_time += perf_counter() - decode_started
+                    decode_time += decode_elapsed
                 if frame_payload is not None and upscaler is not None:
+                    upscale_started = perf_counter()
                     frame_payload = upscaler.upscale(frame_payload, process_width, process_height)
+                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
                 return frame_payload
 
             def _estimate_depth(frame_payload: np.ndarray) -> np.ndarray:
                 nonlocal depth_time
                 depth_started = perf_counter()
                 depth_payload = depth_estimator.estimate(frame_payload)
+                depth_elapsed = perf_counter() - depth_started
+                function_timing.record("depth_estimate", depth_elapsed * 1000.0)
                 with timing_lock:
-                    depth_time += perf_counter() - depth_started
+                    depth_time += depth_elapsed
                 return depth_payload
 
             def _estimate_depth_batch(frame_payloads: list[np.ndarray]) -> list[Any]:
@@ -524,8 +558,10 @@ def run_conversion(
                         )
                         for frame_payload, depth_payload in zip(frame_payloads, batch_results, strict=True)
                     ]
+                depth_elapsed = perf_counter() - depth_started
+                function_timing.record("depth_estimate_batch", depth_elapsed * 1000.0)
                 with timing_lock:
-                    depth_time += perf_counter() - depth_started
+                    depth_time += depth_elapsed
                 return batch_results
 
             def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -537,8 +573,10 @@ def run_conversion(
                     config.stereo_strength,
                     config.max_disparity_px,
                 )
+                stereo_elapsed = perf_counter() - stereo_started
+                function_timing.record("stereo_synthesize", stereo_elapsed * 1000.0)
                 with timing_lock:
-                    stereo_time += perf_counter() - stereo_started
+                    stereo_time += stereo_elapsed
                 return stereo_payload
 
             def _synthesize_stereo_batch(
@@ -560,8 +598,10 @@ def run_conversion(
                         stereo_backend.synthesize(frame, depth, config.stereo_strength, config.max_disparity_px)
                         for frame, depth in zip(frame_payloads, depth_payloads, strict=True)
                     ]
+                stereo_elapsed = perf_counter() - stereo_started
+                function_timing.record("stereo_synthesize_batch", stereo_elapsed * 1000.0)
                 with timing_lock:
-                    stereo_time += perf_counter() - stereo_started
+                    stereo_time += stereo_elapsed
                 return stereo_payloads
 
             def _compose_sbs(stereo_payload: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
@@ -569,16 +609,20 @@ def run_conversion(
                 compose_started = perf_counter()
                 left_eye, right_eye = stereo_payload
                 sbs_frame_payload = compose_sbs(left_eye, right_eye, config.sbs_mode)
+                compose_elapsed = perf_counter() - compose_started
+                function_timing.record("compose_sbs", compose_elapsed * 1000.0)
                 with timing_lock:
-                    stereo_time += perf_counter() - compose_started
+                    stereo_time += compose_elapsed
                 return sbs_frame_payload
 
             def _write_frame(_frame_index: int, sbs_frame_payload: np.ndarray) -> None:
                 nonlocal encode_time, frames_processed, frames_processed_this_run
                 encode_started = perf_counter()
                 write_raw_frame(writer, sbs_frame_payload)
+                encode_elapsed = perf_counter() - encode_started
+                function_timing.record("write_raw_frame", encode_elapsed * 1000.0)
                 with timing_lock:
-                    encode_time += perf_counter() - encode_started
+                    encode_time += encode_elapsed
                 frames_processed += 1
                 frames_processed_this_run += 1
                 progress.update(1)
@@ -733,6 +777,14 @@ def run_conversion(
             print(summary_message)
             if callbacks and callbacks.on_status:
                 callbacks.on_status(summary_message)
+            top_entries = function_timing.snapshot_top_n(5)
+            if top_entries:
+                function_summary_message = (
+                    f"Function timing summary: {format_function_timing_top(top_entries)}"
+                )
+                print(function_summary_message)
+                if callbacks and callbacks.on_status:
+                    callbacks.on_status(function_summary_message)
         if callbacks and callbacks.on_complete:
             callbacks.on_complete(
                 {
