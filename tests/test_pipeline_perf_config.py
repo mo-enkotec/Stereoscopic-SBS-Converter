@@ -4,6 +4,7 @@ from vr_sbs_converter.config import ConversionConfig
 from vr_sbs_converter.pipeline import (
     _cap_cuda_batch_size_for_resolution,
     _cap_gpu_depth_queue,
+    _should_enable_gpu_stereo,
     resolve_parallel_queue_config,
     resolve_runtime_plan,
 )
@@ -138,3 +139,63 @@ def test_cap_cuda_batch_size_for_resolution_prefers_single_batch_on_1080p_plus()
 def test_cap_cuda_batch_size_for_resolution_allows_small_batches_for_low_res() -> None:
     assert _cap_cuda_batch_size_for_resolution(4, 1280, 720) == 2
     assert _cap_cuda_batch_size_for_resolution(4, 640, 360) == 4
+
+
+def test_quality_4k_prefers_cpu_stereo_when_effective_batch_is_one() -> None:
+    config = ConversionConfig(
+        input_path=Path("/tmp/in.mp4"),
+        output_path=Path("/tmp/out.mp4"),
+        perf_mode="quality",
+        device="cuda",
+    )
+
+    assert (
+        _should_enable_gpu_stereo(
+            config=config,
+            stereo_backend_name="torch-cuda",
+            effective_depth_batch_size=1,
+            width=3840,
+            height=2160,
+        )
+        is False
+    )
+
+
+def test_gpu_balanced_keeps_gpu_stereo_with_batch_two() -> None:
+    config = ConversionConfig(
+        input_path=Path("/tmp/in.mp4"),
+        output_path=Path("/tmp/out.mp4"),
+        perf_mode="gpu-balanced",
+        device="cuda",
+    )
+
+    assert (
+        _should_enable_gpu_stereo(
+            config=config,
+            stereo_backend_name="torch-cuda",
+            effective_depth_batch_size=2,
+            width=3840,
+            height=2160,
+        )
+        is True
+    )
+
+
+def test_quality_1080p_does_not_auto_bypass_gpu_stereo() -> None:
+    config = ConversionConfig(
+        input_path=Path("/tmp/in.mp4"),
+        output_path=Path("/tmp/out.mp4"),
+        perf_mode="quality",
+        device="cuda",
+    )
+
+    assert (
+        _should_enable_gpu_stereo(
+            config=config,
+            stereo_backend_name="torch-cuda",
+            effective_depth_batch_size=1,
+            width=1920,
+            height=1080,
+        )
+        is True
+    )
