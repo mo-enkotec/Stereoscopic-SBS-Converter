@@ -43,7 +43,6 @@ class ConversionConfig:
     audio_fallback: AudioFallbackMode = "copy-aac"
     max_disparity_px: int | None = None
     depth_process_scale: float | None = None
-    depth_process_scale_overridden: bool = False
     edge_protect_strength: float | None = None
     stereo_strength: float = 0.8
     parallel_queue_size: int | None = None
@@ -76,11 +75,6 @@ class ConversionConfig:
             raise ValueError("Invalid --compat-profile value.")
         if self.audio_fallback not in {"copy-aac"}:
             raise ValueError("Invalid --audio-fallback value.")
-        if not isinstance(self.depth_process_scale_overridden, bool):
-            raise ValueError("--depth-process-scale-overridden must be a boolean value.")
-
-        if self.depth_process_scale is not None:
-            self.depth_process_scale_overridden = True
 
         if self.max_disparity_px is None:
             self.max_disparity_px = {"halo-safe": 12, "balanced": 16, "fast": 22}[self.profile]

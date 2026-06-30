@@ -82,13 +82,6 @@ def _is_cuda_runtime_available() -> bool:
 
 def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
     depth_scale = config.depth_process_scale if config.depth_process_scale is not None else 1.0
-    if (
-        config.perf_mode == "quality"
-        and config.upscale
-        and (config.target_height or 0) >= 2160
-        and not config.depth_process_scale_overridden
-    ):
-        depth_scale = min(depth_scale, 0.7)
     use_cuda_runtime = config.device == "cuda" or (
         config.device == "auto" and _is_cuda_runtime_available()
     )
@@ -629,9 +622,23 @@ def run_conversion(
                 _emit_preview(sbs_frame_payload)
 
             def _on_parallel_progress(payload: dict[str, Any]) -> None:
+                if callbacks is None or callbacks.on_progress is None:
+                    return
                 current_written = int(payload.get("frame_index", 0))
                 absolute_frame = resume_start_frame + current_written
-                _emit_progress(absolute_frame, stage=str(payload.get("stage", "converting")))
+                percent = (
+                    (absolute_frame / metadata.total_frames) * 100.0
+                    if metadata.total_frames > 0
+                    else 0.0
+                )
+                callbacks.on_progress(
+                    {
+                        "frame_index": absolute_frame,
+                        "total_frames": metadata.total_frames,
+                        "percent": percent,
+                        "stage": str(payload.get("stage", "converting")),
+                    }
+                )
 
             parallel_callbacks = None
             if callbacks is not None:
@@ -658,10 +665,10 @@ def run_conversion(
             frames_processed_this_run = max(frames_processed_this_run, current_frames)
             frames_processed = max(frames_processed, resume_start_frame + current_frames)
 
+        processing_started = perf_counter()
         try:
             if resume_start_frame > 0:
                 _skip_frames_to_resume(resume_start_frame)
-            eta_started = perf_counter()
             if use_parallel:
                 _run_parallel_frames()
             else:
@@ -677,7 +684,7 @@ def run_conversion(
         except Exception as exc:
             pending_error = exc
         finally:
-            processing_elapsed = perf_counter() - conversion_started
+            processing_elapsed = perf_counter() - processing_started
             progress.close()
             try:
                 close_reader(reader)

@@ -73,7 +73,6 @@ def build_advanced_config(
         "audio_fallback",
         "max_disparity_px",
         "depth_process_scale",
-        "depth_process_scale_overridden",
         "edge_protect_strength",
         "stereo_strength",
         "parallel_queue_size",

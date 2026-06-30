@@ -126,23 +126,3 @@ def test_advanced_panel_gpu_batch_size_defaults_to_auto_none() -> None:
     state = panel.get_state()
 
     assert state["gpu_batch_size"] is None
-
-
-def test_advanced_panel_depth_scale_is_not_marked_overridden_by_default() -> None:
-    _ensure_app()
-    panel = AdvancedPanel()
-
-    state = panel.get_state()
-
-    assert state["depth_process_scale_overridden"] is False
-    assert state["depth_process_scale"] is None
-
-
-def test_advanced_panel_depth_scale_is_marked_overridden_when_changed() -> None:
-    _ensure_app()
-    panel = AdvancedPanel()
-    panel.depth_process_scale.setValue(0.85)
-
-    state = panel.get_state()
-
-    assert state["depth_process_scale_overridden"] is True

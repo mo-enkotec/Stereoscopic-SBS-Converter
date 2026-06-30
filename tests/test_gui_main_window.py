@@ -98,21 +98,24 @@ def test_main_window_has_no_preview_ui_or_callbacks() -> None:
     assert not hasattr(window, "_on_preview_frame")
 
 
-def test_main_window_progress_status_includes_eta() -> None:
+def test_main_window_progress_status_includes_eta(monkeypatch) -> None:
     _ensure_app()
     window = MainWindow()
 
+    timestamps = iter([100.0, 130.0])
+    monkeypatch.setattr("vr_sbs_converter.gui.main_window.perf_counter", lambda: next(timestamps))
+
     window._on_worker_started({"total_frames": 100})
-    window._on_worker_progress(
-        {"percent": 25.0, "frame_index": 25, "total_frames": 100, "eta_seconds": 90.0}
-    )
+    window._on_worker_progress({"percent": 25.0, "frame_index": 25, "total_frames": 100})
 
     assert window._status_label.text() == "Converting frame 25/100 • ETA 01:30"
 
 
-def test_main_window_progress_status_handles_unknown_eta() -> None:
+def test_main_window_progress_status_handles_unknown_eta(monkeypatch) -> None:
     _ensure_app()
     window = MainWindow()
+
+    monkeypatch.setattr("vr_sbs_converter.gui.main_window.perf_counter", lambda: 10.0)
 
     window._on_worker_started({"total_frames": 0})
     window._on_worker_progress({"percent": 0.0, "frame_index": 0, "total_frames": 0})

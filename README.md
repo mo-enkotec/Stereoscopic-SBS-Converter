@@ -155,10 +155,6 @@ During conversion, the runtime also emits a live `Function timing top-5` status 
 
 At completion, the runtime emits a `Function timing summary` line with the final top averages.
 
-For `quality` mode at high resolutions (for example 4K upscaling), the runtime may automatically bypass GPU stereo batching and use the CPU stereo path when GPU batching resolves to a low-gain configuration (effective batch size `1`). This is intentional to improve wall-clock throughput and reduce memory-wave behavior.
-
-For `quality` + 4K upscaling, the runtime can also lower effective depth inference scale to improve throughput while keeping the output video at 4K. Explicit `--depth-process-scale` values take priority when you want to lock depth resolution behavior.
-
 In strict compatibility mode, the converter may print compatibility warnings after encoding if stream properties are likely to fail in stricter players.
 
 > Note: keeping full-SBS at very large dimensions (for example 7680x2160) can still exceed decoder limits on some devices even with compatible codec/pixel format settings.

@@ -57,8 +57,6 @@ class AdvancedPanel(QWidget):
         self.depth_process_scale.setRange(0.1, 1.0)
         self.depth_process_scale.setSingleStep(0.05)
         self.depth_process_scale.setValue(1.0)
-        self._depth_process_scale_touched = False
-        self.depth_process_scale.valueChanged.connect(self._on_depth_process_scale_changed)
 
         self.edge_protect_strength = QDoubleSpinBox()
         self.edge_protect_strength.setRange(0.0, 1.0)
@@ -127,10 +125,7 @@ class AdvancedPanel(QWidget):
             "device": self.device.currentText(),
             "depth_backend": self.depth_backend.currentText(),
             "max_disparity_px": self.max_disparity_px.value(),
-            "depth_process_scale": (
-                self.depth_process_scale.value() if self._depth_process_scale_touched else None
-            ),
-            "depth_process_scale_overridden": self._depth_process_scale_touched,
+            "depth_process_scale": self.depth_process_scale.value(),
             "edge_protect_strength": self.edge_protect_strength.value(),
             "stereo_strength": self.stereo_strength.value(),
             "parallel_queue_size": (
@@ -142,6 +137,3 @@ class AdvancedPanel(QWidget):
             "keep_temp": self.keep_temp.isChecked(),
             "temp_dir": Path(temp_dir_value).expanduser() if temp_dir_value else None,
         }
-
-    def _on_depth_process_scale_changed(self, _value: float) -> None:
-        self._depth_process_scale_touched = True

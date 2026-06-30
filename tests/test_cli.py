@@ -30,7 +30,6 @@ def test_build_config_from_args(tmp_path: Path) -> None:
     assert config.output_path.name == "input.sbs.mp4"
     assert config.upscale is True
     assert config.target_height == 2160
-    assert config.depth_process_scale_overridden is False
 
 
 def test_build_config_rejects_existing_output_without_overwrite(tmp_path: Path) -> None:
@@ -78,7 +77,6 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
     assert config.encoder == "auto"
     assert config.max_disparity_px == 16
     assert config.depth_process_scale == 0.75
-    assert config.depth_process_scale_overridden is True
     assert config.edge_protect_strength == 0.85
     assert config.parallel_queue_size == 10
     assert config.gpu_batch_size == 4

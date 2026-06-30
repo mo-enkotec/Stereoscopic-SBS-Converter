@@ -72,16 +72,7 @@ def test_run_conversion_emits_callbacks(tmp_path: Path) -> None:
     assert len(events["progress"]) > 0
     assert len(events["preview"]) > 0
     assert {"input_path", "output_path", "total_frames", "fps", "width", "height"} <= set(events["start"][0].keys())
-    assert {
-        "frame_index",
-        "total_frames",
-        "percent",
-        "stage",
-        "elapsed_seconds",
-        "processing_fps",
-        "remaining_frames",
-        "eta_seconds",
-    } <= set(events["progress"][0].keys())
+    assert {"frame_index", "total_frames", "percent", "stage"} <= set(events["progress"][0].keys())
     assert {"frames_processed", "effective_fps", "encoder", "output_path"} <= set(events["complete"][0].keys())
     assert any("Runtime summary:" in message for message in events["status"])
 

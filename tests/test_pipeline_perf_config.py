@@ -67,51 +67,6 @@ def test_quality_mode_uses_full_depth_scale() -> None:
     assert runtime.preferred_encoder == "libx264"
 
 
-def test_quality_4k_upscale_uses_adaptive_depth_scale_for_throughput() -> None:
-    config = ConversionConfig(
-        input_path=Path("/tmp/in.mp4"),
-        output_path=Path("/tmp/out.mp4"),
-        perf_mode="quality",
-        device="cuda",
-        upscale=True,
-        target_height=2160,
-    )
-
-    runtime = resolve_runtime_plan(config)
-    assert runtime.depth_process_scale == 0.7
-
-
-def test_quality_4k_upscale_respects_explicit_depth_scale_override() -> None:
-    config = ConversionConfig(
-        input_path=Path("/tmp/in.mp4"),
-        output_path=Path("/tmp/out.mp4"),
-        perf_mode="quality",
-        device="cuda",
-        upscale=True,
-        target_height=2160,
-        depth_process_scale=1.0,
-        depth_process_scale_overridden=True,
-    )
-
-    runtime = resolve_runtime_plan(config)
-    assert runtime.depth_process_scale == 1.0
-
-
-def test_quality_4k_upscale_respects_direct_config_depth_scale() -> None:
-    config = ConversionConfig(
-        input_path=Path("/tmp/in.mp4"),
-        output_path=Path("/tmp/out.mp4"),
-        perf_mode="quality",
-        device="cuda",
-        upscale=True,
-        target_height=2160,
-        depth_process_scale=1.0,
-    )
-
-    runtime = resolve_runtime_plan(config)
-    assert runtime.depth_process_scale == 1.0
-
-
 def test_resolve_parallel_queue_config_uses_perf_mode_defaults() -> None:
     quality = ConversionConfig(
         input_path=Path("/tmp/in.mp4"),
