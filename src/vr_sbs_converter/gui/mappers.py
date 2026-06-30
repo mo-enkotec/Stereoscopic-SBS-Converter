@@ -73,6 +73,8 @@ def build_advanced_config(
         "edge_protect_strength",
         "stereo_strength",
         "parallel_queue_size",
+        "gpu_batch_size",
+        "gpu_stream_overlap",
         "overwrite",
         "keep_temp",
         "temp_dir",

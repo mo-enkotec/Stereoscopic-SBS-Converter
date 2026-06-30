@@ -12,6 +12,9 @@ class DepthEstimator(ABC):
     def estimate(self, frame_bgr: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
+    def estimate_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        return [self.estimate(frame) for frame in frames_bgr]
+
 
 class TemporalDepthSmoother:
     def __init__(self, alpha: float = 0.65) -> None:
@@ -124,10 +127,7 @@ class MidasDepthEstimator(DepthEstimator):
             torch.backends.cudnn.benchmark = True
         self._model.eval()
 
-    def estimate(self, frame_bgr: np.ndarray) -> np.ndarray:
-        self._load()
-        assert self._model is not None and self._processor is not None and self._torch is not None
-
+    def _prepare_inference_rgb(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         inference_rgb = rgb
         if self._depth_process_scale < 1.0:
@@ -138,6 +138,13 @@ class MidasDepthEstimator(DepthEstimator):
                 (scaled_width, scaled_height),
                 interpolation=cv2.INTER_AREA,
             )
+        return rgb, inference_rgb
+
+    def estimate(self, frame_bgr: np.ndarray) -> np.ndarray:
+        self._load()
+        assert self._model is not None and self._processor is not None and self._torch is not None
+
+        rgb, inference_rgb = self._prepare_inference_rgb(frame_bgr)
 
         inputs = self._processor(images=inference_rgb, return_tensors="pt")
         torch_device = self._resolve_device()
@@ -161,6 +168,48 @@ class MidasDepthEstimator(DepthEstimator):
         )
         return self._smoother.apply(conditioned)
 
+    def estimate_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        if not frames_bgr:
+            return []
+
+        self._load()
+        assert self._model is not None and self._processor is not None and self._torch is not None
+
+        prepared = [self._prepare_inference_rgb(frame) for frame in frames_bgr]
+        rgb_frames = [item[0] for item in prepared]
+        inference_rgbs = [item[1] for item in prepared]
+        base_output_shape = rgb_frames[0].shape[:2]
+        base_inference_shape = inference_rgbs[0].shape[:2]
+        if any(frame.shape[:2] != base_output_shape for frame in rgb_frames):
+            return super().estimate_batch(frames_bgr)
+        if any(frame.shape[:2] != base_inference_shape for frame in inference_rgbs):
+            return super().estimate_batch(frames_bgr)
+
+        inputs = self._processor(images=inference_rgbs, return_tensors="pt")
+        torch_device = self._resolve_device()
+        inputs = {key: value.to(torch_device) for key, value in inputs.items()}
+
+        with self._torch.no_grad():
+            use_autocast = self._use_fp16 and torch_device == "cuda"
+            with self._torch.cuda.amp.autocast(enabled=use_autocast):
+                predicted = self._model(**inputs).predicted_depth
+                resized = self._torch.nn.functional.interpolate(
+                    predicted.unsqueeze(1),
+                    size=base_output_shape,
+                    mode="bicubic",
+                    align_corners=False,
+                ).squeeze(1)
+        depth_batch = resized.detach().cpu().numpy()
+        conditioned_batch: list[np.ndarray] = []
+        for depth, frame_bgr in zip(depth_batch, frames_bgr, strict=True):
+            conditioned = condition_depth_for_stereo(
+                depth.astype(np.float32),
+                frame_bgr,
+                edge_protect_strength=self._edge_protect_strength,
+            )
+            conditioned_batch.append(self._smoother.apply(conditioned))
+        return conditioned_batch
+
 
 class AutoDepthEstimator(DepthEstimator):
     def __init__(self, preferred: DepthEstimator, fallback: DepthEstimator) -> None:
@@ -181,6 +230,20 @@ class AutoDepthEstimator(DepthEstimator):
             )
             self._use_fallback = True
             return self._fallback.estimate(frame_bgr)
+
+    def estimate_batch(self, frames_bgr: list[np.ndarray]) -> list[np.ndarray]:
+        if self._use_fallback:
+            return self._fallback.estimate_batch(frames_bgr)
+        try:
+            return self._preferred.estimate_batch(frames_bgr)
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            warnings.warn(
+                f"Preferred depth backend failed ({exc}); switching to luma depth.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._use_fallback = True
+            return self._fallback.estimate_batch(frames_bgr)
 
 
 def create_depth_estimator(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import importlib
 from threading import Lock
 from time import perf_counter
 import shutil
@@ -27,9 +28,9 @@ from .compatibility import evaluate_player_compatibility, probe_output_video_str
 from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
-from .pipeline_parallel import ParallelQueueConfig, run_parallel_conversion_configured
+from .pipeline_parallel import DepthFramePayload, ParallelQueueConfig, run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
-from .stereo_torch import select_stereo_synthesis_backend
+from .stereo_torch import select_stereo_synthesis_backend, synthesize_stereo_views_torch_batch
 from .upscaling import compute_target_dimensions, create_default_upscaler
 from .video_io import (
     VideoIOError,
@@ -114,6 +115,38 @@ def resolve_parallel_queue_config(config: ConversionConfig) -> ParallelQueueConf
         stereo_queue_size=queue_size,
         encode_queue_size=queue_size,
     )
+
+
+def resolve_gpu_batch_size(config: ConversionConfig) -> int:
+    if config.gpu_batch_size is not None:
+        return config.gpu_batch_size
+
+    return {
+        "quality": 1,
+        "gpu-balanced": 2,
+        "max-speed": 4,
+    }[config.perf_mode]
+
+
+def _cap_gpu_depth_queue(queue_config: ParallelQueueConfig) -> ParallelQueueConfig:
+    capped_depth = min(queue_config.depth_queue_size, 2)
+    if capped_depth == queue_config.depth_queue_size:
+        return queue_config
+    return ParallelQueueConfig(
+        decode_queue_size=queue_config.decode_queue_size,
+        depth_queue_size=capped_depth,
+        stereo_queue_size=queue_config.stereo_queue_size,
+        encode_queue_size=queue_config.encode_queue_size,
+    )
+
+
+def _cap_cuda_batch_size_for_resolution(batch_size: int, width: int, height: int) -> int:
+    pixels = width * height
+    if pixels >= (1920 * 1080):
+        return min(batch_size, 1)
+    if pixels >= (1280 * 720):
+        return min(batch_size, 2)
+    return batch_size
 
 
 def _progress_root() -> Path:
@@ -342,11 +375,31 @@ def run_conversion(
             nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed, frames_processed_this_run
 
             stereo_backend = select_stereo_synthesis_backend(config.device)
+            stereo_backend_name = getattr(stereo_backend, "name", "cpu")
+            torch_module = None
+            if stereo_backend_name == "torch-cuda":
+                try:
+                    torch_module = importlib.import_module("torch")
+                except Exception:
+                    torch_module = None
             queue_config = resolve_parallel_queue_config(config)
+            depth_batch_size = resolve_gpu_batch_size(config)
+            stereo_batch_size = depth_batch_size if stereo_backend_name == "torch-cuda" else 1
+            if stereo_backend_name == "torch-cuda" and torch_module is not None:
+                queue_config = _cap_gpu_depth_queue(queue_config)
+                depth_batch_size = min(depth_batch_size, queue_config.depth_queue_size)
+                depth_batch_size = _cap_cuda_batch_size_for_resolution(
+                    depth_batch_size,
+                    process_width,
+                    process_height,
+                )
+                stereo_batch_size = min(stereo_batch_size, queue_config.depth_queue_size, depth_batch_size)
             if callbacks and callbacks.on_status:
                 callbacks.on_status(
                     "Parallel runtime: "
-                    f"queue={queue_config.decode_queue_size}, stereo_backend={stereo_backend.name}"
+                    f"queue={queue_config.decode_queue_size}, "
+                    f"depth_batch={depth_batch_size}, stereo_batch={stereo_batch_size}, "
+                    f"stereo_backend={stereo_backend_name}"
                 )
 
             def _read_frame() -> np.ndarray | None:
@@ -367,6 +420,34 @@ def run_conversion(
                     depth_time += perf_counter() - depth_started
                 return depth_payload
 
+            def _estimate_depth_batch(frame_payloads: list[np.ndarray]) -> list[Any]:
+                nonlocal depth_time
+                depth_started = perf_counter()
+                estimate_batch = getattr(depth_estimator, "estimate_batch", None)
+                if callable(estimate_batch):
+                    batch_results = estimate_batch(frame_payloads)
+                else:
+                    batch_results = [depth_estimator.estimate(item) for item in frame_payloads]
+                if stereo_backend_name == "torch-cuda" and torch_module is not None:
+                    batch_results = [
+                        DepthFramePayload(
+                            frame_payload=torch_module.from_numpy(frame_payload).to(
+                                device="cuda",
+                                dtype=torch_module.float32,
+                            ),
+                            depth_payload=torch_module.from_numpy(
+                                np.clip(np.asarray(depth_payload, dtype=np.float32), 0.0, 1.0)
+                            ).to(
+                                device="cuda",
+                                dtype=torch_module.float32,
+                            ),
+                        )
+                        for frame_payload, depth_payload in zip(frame_payloads, batch_results, strict=True)
+                    ]
+                with timing_lock:
+                    depth_time += perf_counter() - depth_started
+                return batch_results
+
             def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
                 nonlocal stereo_time
                 stereo_started = perf_counter()
@@ -379,6 +460,29 @@ def run_conversion(
                 with timing_lock:
                     stereo_time += perf_counter() - stereo_started
                 return stereo_payload
+
+            def _synthesize_stereo_batch(
+                frame_payloads: list[np.ndarray],
+                depth_payloads: list[np.ndarray],
+            ) -> list[tuple[np.ndarray, np.ndarray]]:
+                nonlocal stereo_time
+                stereo_started = perf_counter()
+                if stereo_backend_name == "torch-cuda":
+                    stereo_payloads = synthesize_stereo_views_torch_batch(
+                        frame_payloads,
+                        depth_payloads,
+                        config.stereo_strength,
+                        config.max_disparity_px,
+                        stream_overlap=config.gpu_stream_overlap,
+                    )
+                else:
+                    stereo_payloads = [
+                        stereo_backend.synthesize(frame, depth, config.stereo_strength, config.max_disparity_px)
+                        for frame, depth in zip(frame_payloads, depth_payloads, strict=True)
+                    ]
+                with timing_lock:
+                    stereo_time += perf_counter() - stereo_started
+                return stereo_payloads
 
             def _compose_sbs(stereo_payload: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
                 nonlocal stereo_time
@@ -429,7 +533,11 @@ def run_conversion(
             parallel_result = run_parallel_conversion_configured(
                 read_frame=_read_frame,
                 estimate_depth=_estimate_depth,
+                estimate_depth_batch=_estimate_depth_batch,
+                depth_batch_size=depth_batch_size,
                 synthesize_stereo=_synthesize_stereo,
+                synthesize_stereo_batch=_synthesize_stereo_batch if stereo_backend_name == "torch-cuda" else None,
+                stereo_batch_size=stereo_batch_size,
                 compose_sbs=_compose_sbs,
                 write_frame=_write_frame,
                 queue_config=queue_config,

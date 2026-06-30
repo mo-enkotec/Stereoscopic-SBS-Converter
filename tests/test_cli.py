@@ -66,6 +66,8 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
             "0.85",
             "--parallel-queue-size",
             "10",
+            "--gpu-batch-size",
+            "4",
             "--overwrite",
         ]
     )
@@ -77,6 +79,24 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
     assert config.depth_process_scale == 0.75
     assert config.edge_protect_strength == 0.85
     assert config.parallel_queue_size == 10
+    assert config.gpu_batch_size == 4
+    assert config.gpu_stream_overlap is True
+
+
+def test_build_config_supports_disabling_gpu_stream_overlap(tmp_path: Path) -> None:
+    input_file = tmp_path / "stream.mp4"
+    input_file.write_bytes(b"fake")
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            str(input_file),
+            "--no-gpu-stream-overlap",
+            "--overwrite",
+        ]
+    )
+
+    config = build_config(args)
+    assert config.gpu_stream_overlap is False
 
 
 def test_build_config_defaults_to_strict_compatibility(tmp_path: Path) -> None:

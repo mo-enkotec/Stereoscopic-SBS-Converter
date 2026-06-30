@@ -46,6 +46,8 @@ class ConversionConfig:
     edge_protect_strength: float | None = None
     stereo_strength: float = 0.8
     parallel_queue_size: int | None = None
+    gpu_batch_size: int | None = None
+    gpu_stream_overlap: bool = True
     overwrite: bool = False
     keep_temp: bool = False
     temp_dir: Path | None = None
@@ -99,6 +101,10 @@ class ConversionConfig:
             self.parallel_queue_size <= 0 or self.parallel_queue_size > 256
         ):
             raise ValueError("--parallel-queue-size must be in range [1, 256].")
+        if self.gpu_batch_size is not None and (self.gpu_batch_size <= 0 or self.gpu_batch_size > 64):
+            raise ValueError("--gpu-batch-size must be in range [1, 64].")
+        if not isinstance(self.gpu_stream_overlap, bool):
+            raise ValueError("--gpu-stream-overlap must be a boolean value.")
 
 
 def parse_target_height(value: str) -> int:

@@ -105,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--gpu-batch-size",
+        type=int,
+        help="Depth-stage microbatch size for parallel GPU processing.",
+    )
+    parser.add_argument(
+        "--gpu-stream-overlap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable CUDA stream overlap for batched stereo synthesis.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow replacing an existing output file.",
@@ -166,6 +177,8 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         edge_protect_strength=args.edge_protect_strength,
         stereo_strength=args.stereo_strength,
         parallel_queue_size=args.parallel_queue_size,
+        gpu_batch_size=args.gpu_batch_size,
+        gpu_stream_overlap=args.gpu_stream_overlap,
         overwrite=args.overwrite,
         keep_temp=args.keep_temp,
         temp_dir=temp_dir,
