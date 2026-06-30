@@ -75,3 +75,12 @@ def test_conversion_config_rejects_non_boolean_gpu_stream_overlap(tmp_path: Path
             output_path=tmp_path / "out.mp4",
             gpu_stream_overlap="sometimes",  # type: ignore[arg-type]
         )
+
+
+def test_conversion_config_rejects_non_boolean_depth_scale_overridden(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        ConversionConfig(
+            input_path=tmp_path / "in.mp4",
+            output_path=tmp_path / "out.mp4",
+            depth_process_scale_overridden="yes",  # type: ignore[arg-type]
+        )

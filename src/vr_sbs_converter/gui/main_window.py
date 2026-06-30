@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import perf_counter
 
 from PySide6.QtCore import QThread
 from PySide6.QtWidgets import (
@@ -62,7 +61,6 @@ class MainWindow(QMainWindow):
 
         self._thread: QThread | None = None
         self._worker: ConversionWorker | None = None
-        self._conversion_started_at: float | None = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -157,7 +155,6 @@ class MainWindow(QMainWindow):
         self._cancel_button.setEnabled(True)
         self._progress_bar.setValue(0)
         self._status_label.setText("Starting conversion...")
-        self._conversion_started_at = perf_counter()
         self._thread.start()
 
     def _cancel_conversion(self) -> None:
@@ -168,8 +165,6 @@ class MainWindow(QMainWindow):
         self._worker.cancel()
 
     def _on_worker_started(self, payload: dict[str, object]) -> None:
-        if self._conversion_started_at is None:
-            self._conversion_started_at = perf_counter()
         total_frames = payload.get("total_frames", 0)
         self._append_status(f"Started conversion ({total_frames} frames).")
         self._status_label.setText("Converting...")
@@ -179,13 +174,8 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(max(0, min(100, percent)))
         frame_index = int(payload.get("frame_index", 0))
         total_frames = int(payload.get("total_frames", 0))
-        eta_seconds: float | None = None
-        if self._conversion_started_at is not None and total_frames > 0 and frame_index > 0:
-            elapsed = max(0.0, perf_counter() - self._conversion_started_at)
-            progress_fraction = min(1.0, frame_index / total_frames)
-            if progress_fraction > 0:
-                estimated_total = elapsed / progress_fraction
-                eta_seconds = max(0.0, estimated_total - elapsed)
+        eta_raw = payload.get("eta_seconds")
+        eta_seconds = float(eta_raw) if isinstance(eta_raw, (int, float)) else None
         eta_text = self._format_eta(eta_seconds)
         self._status_label.setText(f"Converting frame {frame_index}/{total_frames} • ETA {eta_text}")
 
@@ -210,7 +200,6 @@ class MainWindow(QMainWindow):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
-        self._conversion_started_at = None
         self._start_button.setEnabled(True)
         self._cancel_button.setEnabled(False)
 

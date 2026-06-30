@@ -46,6 +46,7 @@ def _stable_config_payload(config: ConversionConfig) -> dict[str, object]:
         "audio_fallback": config.audio_fallback,
         "max_disparity_px": config.max_disparity_px,
         "depth_process_scale": config.depth_process_scale,
+        "depth_process_scale_overridden": config.depth_process_scale_overridden,
         "edge_protect_strength": config.edge_protect_strength,
         "stereo_strength": config.stereo_strength,
     }

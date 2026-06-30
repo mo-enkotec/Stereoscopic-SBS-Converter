@@ -147,7 +147,11 @@ python main.py /path/to/input.mp4 \
 
 At the end of conversion, the CLI prints a runtime summary containing selected profile/perf mode, encoder path, effective FPS, and average stage timings.
 
+ETA is computed in the conversion pipeline and emitted to the GUI progress callback as the canonical ETA source. During warm-up and short clips, ETA can still fluctuate, but GUI/runtime progress now follows the same estimator inputs.
+
 For `quality` mode at high resolutions (for example 4K upscaling), the runtime may automatically bypass GPU stereo batching and use the CPU stereo path when GPU batching resolves to a low-gain configuration (effective batch size `1`). This is intentional to improve wall-clock throughput and reduce memory-wave behavior.
+
+For `quality` + 4K upscaling, the runtime can also lower effective depth inference scale to improve throughput while keeping the output video at 4K. Explicit `--depth-process-scale` values take priority when you want to lock depth resolution behavior.
 
 In strict compatibility mode, the converter may print compatibility warnings after encoding if stream properties are likely to fail in stricter players.
 

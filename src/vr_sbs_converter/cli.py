@@ -174,6 +174,7 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         audio_fallback=args.audio_fallback,
         max_disparity_px=args.max_disparity_px,
         depth_process_scale=args.depth_process_scale,
+        depth_process_scale_overridden=args.depth_process_scale is not None,
         edge_protect_strength=args.edge_protect_strength,
         stereo_strength=args.stereo_strength,
         parallel_queue_size=args.parallel_queue_size,
