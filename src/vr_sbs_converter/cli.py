@@ -97,14 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stereo disparity strength. Typical range: 0.4-1.2.",
     )
     parser.add_argument(
-        "--parallel-queue-size",
-        type=int,
-        help=(
-            "Queue depth per pipeline stage in parallel mode. "
-            "Higher values can improve GPU utilization at the cost of memory."
-        ),
-    )
-    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow replacing an existing output file.",
@@ -165,7 +157,6 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         depth_process_scale=args.depth_process_scale,
         edge_protect_strength=args.edge_protect_strength,
         stereo_strength=args.stereo_strength,
-        parallel_queue_size=args.parallel_queue_size,
         overwrite=args.overwrite,
         keep_temp=args.keep_temp,
         temp_dir=temp_dir,

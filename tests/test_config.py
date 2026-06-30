@@ -49,11 +49,3 @@ def test_conversion_config_rejects_invalid_compat_profile(tmp_path: Path) -> Non
             compat_profile="broken",  # type: ignore[arg-type]
         )
 
-
-def test_conversion_config_rejects_invalid_parallel_queue_size(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        ConversionConfig(
-            input_path=tmp_path / "in.mp4",
-            output_path=tmp_path / "out.mp4",
-            parallel_queue_size=0,
-        )

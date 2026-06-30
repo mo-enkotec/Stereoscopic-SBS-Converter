@@ -63,7 +63,6 @@ def test_build_advanced_config_honors_option_overrides() -> None:
             "compat_profile": "strict",
             "audio_fallback": "copy-aac",
             "stereo_strength": 0.7,
-            "parallel_queue_size": 14,
             "overwrite": True,
         },
     )
@@ -74,7 +73,6 @@ def test_build_advanced_config_honors_option_overrides() -> None:
     assert config.encoder == "h264_nvenc"
     assert config.depth_backend == "luma"
     assert config.device == "cuda"
-    assert config.parallel_queue_size == 14
 
 
 def test_simple_panel_state_does_not_include_frame_preview_flag() -> None:
@@ -97,10 +95,10 @@ def test_advanced_panel_state_does_not_include_frame_preview_flag() -> None:
     assert "frame_preview_enabled" not in state
 
 
-def test_advanced_panel_queue_size_defaults_to_auto_none() -> None:
+def test_advanced_panel_state_does_not_include_parallel_queue_size() -> None:
     _ensure_app()
     panel = AdvancedPanel()
 
     state = panel.get_state()
 
-    assert state["parallel_queue_size"] is None
+    assert "parallel_queue_size" not in state

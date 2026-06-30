@@ -28,7 +28,7 @@ from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
 from .perf_stats import FunctionTimingCollector, format_function_timing_top
-from .pipeline_parallel import ParallelQueueConfig, run_parallel_conversion_configured
+from .pipeline_parallel import run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
 from .stereo_torch import select_stereo_synthesis_backend
 from .upscaling import compute_target_dimensions, create_default_upscaler
@@ -69,26 +69,13 @@ class ConversionCallbacks:
     preview_enabled: bool = False
     preview_every_n: int = 10
 
-
-def _is_cuda_runtime_available() -> bool:
-    try:
-        import torch  # type: ignore
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
 def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
     depth_scale = config.depth_process_scale if config.depth_process_scale is not None else 1.0
-    use_cuda_runtime = config.device == "cuda" or (
-        config.device == "auto" and _is_cuda_runtime_available()
-    )
-    use_fp16 = use_cuda_runtime and config.perf_mode in {"gpu-balanced", "max-speed"}
+    use_fp16 = config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}
 
     if config.encoder != "auto":
         preferred_encoder = config.encoder
-    elif use_cuda_runtime and config.perf_mode in {"gpu-balanced", "max-speed"}:
+    elif config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}:
         preferred_encoder = "h264_nvenc"
     else:
         preferred_encoder = config.codec
@@ -97,23 +84,6 @@ def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
         depth_process_scale=depth_scale,
         use_fp16=use_fp16,
         preferred_encoder=preferred_encoder,
-    )
-
-
-def resolve_parallel_queue_config(config: ConversionConfig) -> ParallelQueueConfig:
-    queue_size = config.parallel_queue_size
-    if queue_size is None:
-        queue_size = {
-            "quality": 4,
-            "gpu-balanced": 8,
-            "max-speed": 12,
-        }[config.perf_mode]
-
-    return ParallelQueueConfig(
-        decode_queue_size=queue_size,
-        depth_queue_size=queue_size,
-        stereo_queue_size=queue_size,
-        encode_queue_size=queue_size,
     )
 
 
@@ -402,12 +372,6 @@ def run_conversion(
             nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed, frames_processed_this_run
 
             stereo_backend = select_stereo_synthesis_backend(config.device)
-            queue_config = resolve_parallel_queue_config(config)
-            if callbacks and callbacks.on_status:
-                callbacks.on_status(
-                    "Parallel runtime: "
-                    f"queue={queue_config.decode_queue_size}, stereo_backend={stereo_backend.name}"
-                )
 
             def _read_frame() -> np.ndarray | None:
                 nonlocal decode_time
@@ -504,7 +468,6 @@ def run_conversion(
                 synthesize_stereo=_synthesize_stereo,
                 compose_sbs=_compose_sbs,
                 write_frame=_write_frame,
-                queue_config=queue_config,
                 callbacks=parallel_callbacks,
                 total_frames=metadata.total_frames,
             )

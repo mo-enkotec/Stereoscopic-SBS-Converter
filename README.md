@@ -142,7 +142,6 @@ python main.py /path/to/input.mp4 \
 - `--depth-process-scale <float>`: depth inference resolution scale; lower values increase speed.
 - `--edge-protect-strength <float>`: depth edge-preservation intensity.
 - `--stereo-strength <float>`: disparity intensity (recommended range `0.4` to `1.2`).
-- `--parallel-queue-size <int>`: per-stage queue depth in parallel mode (higher can improve throughput but uses more memory).
 - `--codec`, `--preset`, `--crf`: ffmpeg encode controls.
 
 At the end of conversion, the CLI prints a runtime summary containing selected profile/perf mode, encoder path, effective FPS, and average stage timings.

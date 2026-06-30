@@ -68,11 +68,6 @@ class AdvancedPanel(QWidget):
         self.stereo_strength.setSingleStep(0.05)
         self.stereo_strength.setValue(0.8)
 
-        self.parallel_queue_size = QSpinBox()
-        self.parallel_queue_size.setRange(0, 256)
-        self.parallel_queue_size.setSpecialValueText("auto")
-        self.parallel_queue_size.setValue(0)
-
         self.overwrite = QCheckBox("Overwrite output if exists")
         self.overwrite.setChecked(True)
         self.keep_temp = QCheckBox("Keep temporary files")
@@ -95,7 +90,6 @@ class AdvancedPanel(QWidget):
         layout.addRow("Depth scale", self.depth_process_scale)
         layout.addRow("Edge protect strength", self.edge_protect_strength)
         layout.addRow("Stereo strength", self.stereo_strength)
-        layout.addRow("Parallel queue size", self.parallel_queue_size)
         layout.addRow("", self.overwrite)
         layout.addRow("", self.keep_temp)
         layout.addRow("Temp directory", self.temp_dir)
@@ -120,9 +114,6 @@ class AdvancedPanel(QWidget):
             "depth_process_scale": self.depth_process_scale.value(),
             "edge_protect_strength": self.edge_protect_strength.value(),
             "stereo_strength": self.stereo_strength.value(),
-            "parallel_queue_size": (
-                self.parallel_queue_size.value() if self.parallel_queue_size.value() > 0 else None
-            ),
             "overwrite": self.overwrite.isChecked(),
             "keep_temp": self.keep_temp.isChecked(),
             "temp_dir": Path(temp_dir_value).expanduser() if temp_dir_value else None,
