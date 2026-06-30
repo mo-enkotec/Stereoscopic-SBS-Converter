@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 
@@ -280,3 +281,41 @@ def build_mux_audio_command(
 
     command.append(str(destination))
     return command
+
+
+def concat_video_segments(
+    *,
+    segments: list[Path],
+    destination: Path,
+    overwrite: bool,
+) -> None:
+    if not segments:
+        raise VideoIOError("Cannot concatenate zero segments.")
+
+    list_file_path: Path | None = None
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as handle:
+            for segment in segments:
+                escaped = str(segment).replace("'", "'\\''")
+                handle.write(f"file '{escaped}'\n")
+            list_file_path = Path(handle.name)
+
+        command = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y" if overwrite else "-n",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file_path),
+            "-c",
+            "copy",
+            str(destination),
+        ]
+        run_command(command)
+    finally:
+        if list_file_path is not None and list_file_path.exists():
+            list_file_path.unlink()

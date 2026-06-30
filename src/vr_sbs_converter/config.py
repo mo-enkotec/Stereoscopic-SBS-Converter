@@ -45,6 +45,7 @@ class ConversionConfig:
     depth_process_scale: float | None = None
     edge_protect_strength: float | None = None
     stereo_strength: float = 0.8
+    parallel_queue_size: int | None = None
     overwrite: bool = False
     keep_temp: bool = False
     temp_dir: Path | None = None
@@ -94,6 +95,10 @@ class ConversionConfig:
             raise ValueError("--depth-process-scale must be in range (0, 1].")
         if self.edge_protect_strength < 0 or self.edge_protect_strength > 1:
             raise ValueError("--edge-protect-strength must be in range [0, 1].")
+        if self.parallel_queue_size is not None and (
+            self.parallel_queue_size <= 0 or self.parallel_queue_size > 256
+        ):
+            raise ValueError("--parallel-queue-size must be in range [1, 256].")
 
 
 def parse_target_height(value: str) -> int:

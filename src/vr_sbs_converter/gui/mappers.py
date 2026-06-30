@@ -72,6 +72,7 @@ def build_advanced_config(
         "depth_process_scale",
         "edge_protect_strength",
         "stereo_strength",
+        "parallel_queue_size",
         "overwrite",
         "keep_temp",
         "temp_dir",

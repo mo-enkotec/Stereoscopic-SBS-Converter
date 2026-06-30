@@ -12,11 +12,22 @@ from typing import Any, Callable, Iterator
 import numpy as np
 from tqdm import tqdm
 
+from .checkpointing import (
+    append_segment,
+    build_checkpoint_identity,
+    checkpoint_directory,
+    checkpoint_id_from_identity,
+    create_manifest,
+    load_manifest,
+    save_manifest,
+    segment_filename,
+    segment_path,
+)
 from .compatibility import evaluate_player_compatibility, probe_output_video_stream
 from .config import ConversionConfig
 from .depth import create_depth_estimator
 from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
-from .pipeline_parallel import run_parallel_conversion_configured
+from .pipeline_parallel import ParallelQueueConfig, run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
 from .stereo_torch import select_stereo_synthesis_backend
 from .upscaling import compute_target_dimensions, create_default_upscaler
@@ -26,6 +37,7 @@ from .video_io import (
     close_writer,
     ffmpeg_nvenc_usable,
     ffmpeg_supports_encoder,
+    concat_video_segments,
     mux_audio_track,
     open_frame_reader,
     open_frame_writer,
@@ -57,13 +69,25 @@ class ConversionCallbacks:
     preview_every_n: int = 10
 
 
+def _is_cuda_runtime_available() -> bool:
+    try:
+        import torch  # type: ignore
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
     depth_scale = config.depth_process_scale if config.depth_process_scale is not None else 1.0
-    use_fp16 = config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}
+    use_cuda_runtime = config.device == "cuda" or (
+        config.device == "auto" and _is_cuda_runtime_available()
+    )
+    use_fp16 = use_cuda_runtime and config.perf_mode in {"gpu-balanced", "max-speed"}
 
     if config.encoder != "auto":
         preferred_encoder = config.encoder
-    elif config.device == "cuda" and config.perf_mode in {"gpu-balanced", "max-speed"}:
+    elif use_cuda_runtime and config.perf_mode in {"gpu-balanced", "max-speed"}:
         preferred_encoder = "h264_nvenc"
     else:
         preferred_encoder = config.codec
@@ -73,6 +97,27 @@ def resolve_runtime_plan(config: ConversionConfig) -> RuntimePlan:
         use_fp16=use_fp16,
         preferred_encoder=preferred_encoder,
     )
+
+
+def resolve_parallel_queue_config(config: ConversionConfig) -> ParallelQueueConfig:
+    queue_size = config.parallel_queue_size
+    if queue_size is None:
+        queue_size = {
+            "quality": 4,
+            "gpu-balanced": 8,
+            "max-speed": 12,
+        }[config.perf_mode]
+
+    return ParallelQueueConfig(
+        decode_queue_size=queue_size,
+        depth_queue_size=queue_size,
+        stereo_queue_size=queue_size,
+        encode_queue_size=queue_size,
+    )
+
+
+def _progress_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "progress"
 
 
 @contextmanager
@@ -128,6 +173,26 @@ def run_conversion(
         process_width, process_height, config.sbs_mode
     )
 
+    checkpoint_root = _progress_root()
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    identity = build_checkpoint_identity(config)
+    checkpoint_id = checkpoint_id_from_identity(identity)
+    checkpoint_dir = checkpoint_directory(checkpoint_root, checkpoint_id)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    manifest = load_manifest(checkpoint_root, checkpoint_id)
+    if manifest is None or manifest.status == "complete":
+        manifest = create_manifest(checkpoint_id=checkpoint_id, identity=identity)
+        save_manifest(checkpoint_root, manifest)
+
+    resume_start_frame = max(0, int(manifest.next_frame_index))
+    if callbacks and callbacks.on_status:
+        if resume_start_frame > 0:
+            callbacks.on_status(
+                f"Resuming from progress/{checkpoint_id} at frame {resume_start_frame}."
+            )
+        else:
+            callbacks.on_status(f"Starting fresh checkpoint in progress/{checkpoint_id}.")
+
     upscaler = create_default_upscaler() if config.upscale else None
     depth_estimator = create_depth_estimator(
         config.depth_backend,
@@ -139,6 +204,12 @@ def run_conversion(
 
     with _working_directory(config) as work_dir:
         silent_output = work_dir / "sbs_silent.mp4"
+        segment_index = len(manifest.segments)
+        current_segment_name = segment_filename(segment_index)
+        current_segment_path = segment_path(checkpoint_root, checkpoint_id, segment_index)
+        if current_segment_path.exists():
+            current_segment_path.unlink()
+
         reader = open_frame_reader(config.input_path)
         if callbacks and callbacks.on_start:
             callbacks.on_start(
@@ -149,6 +220,7 @@ def run_conversion(
                     "fps": metadata.fps,
                     "width": metadata.width,
                     "height": metadata.height,
+                    "resume_start_frame": resume_start_frame,
                 }
             )
         writer_codec = runtime_plan.preferred_encoder
@@ -161,7 +233,7 @@ def run_conversion(
                     callbacks.on_status(message)
 
         writer = open_frame_writer(
-            output_path=silent_output,
+            output_path=current_segment_path,
             width=output_width,
             height=output_height,
             fps=metadata.fps,
@@ -171,6 +243,7 @@ def run_conversion(
 
         progress = tqdm(
             total=metadata.total_frames if metadata.total_frames > 0 else None,
+            initial=min(resume_start_frame, metadata.total_frames) if metadata.total_frames > 0 else 0,
             unit="frame",
             desc="Converting",
             leave=True,
@@ -179,10 +252,28 @@ def run_conversion(
         depth_time = 0.0
         stereo_time = 0.0
         encode_time = 0.0
-        frames_processed = 0
-        conversion_failed = False
+        frames_processed = resume_start_frame
+        frames_processed_this_run = 0
         processing_elapsed = 0.0
         timing_lock = Lock()
+        pending_error: Exception | None = None
+        conversion_canceled = False
+
+        def _emit_progress(frame_index: int) -> None:
+            if callbacks and callbacks.on_progress:
+                percent = (
+                    (frame_index / metadata.total_frames) * 100.0
+                    if metadata.total_frames > 0
+                    else 0.0
+                )
+                callbacks.on_progress(
+                    {
+                        "frame_index": frame_index,
+                        "total_frames": metadata.total_frames,
+                        "percent": percent,
+                        "stage": "converting",
+                    }
+                )
 
         def _emit_preview(frame_payload: np.ndarray) -> None:
             if (
@@ -193,8 +284,22 @@ def run_conversion(
             ):
                 callbacks.on_frame_preview(frame_payload)
 
+        def _skip_frames_to_resume(target_frame_index: int) -> None:
+            nonlocal decode_time
+            for _ in range(target_frame_index):
+                if callbacks and callbacks.should_cancel and callbacks.should_cancel():
+                    raise ConversionCancelledError("Conversion cancelled by user.")
+                decode_started = perf_counter()
+                frame_payload = read_raw_frame(reader, metadata.width, metadata.height)
+                with timing_lock:
+                    decode_time += perf_counter() - decode_started
+                if frame_payload is None:
+                    raise RuntimeError(
+                        "Cannot resume from checkpoint; source ended before resume frame index."
+                    )
+
         def _run_sequential_frames() -> None:
-            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed
+            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed, frames_processed_this_run
             while True:
                 if callbacks and callbacks.should_cancel and callbacks.should_cancel():
                     raise ConversionCancelledError("Conversion cancelled by user.")
@@ -228,27 +333,21 @@ def run_conversion(
                 with timing_lock:
                     encode_time += perf_counter() - encode_started
                 frames_processed += 1
+                frames_processed_this_run += 1
                 progress.update(1)
-                if callbacks and callbacks.on_progress:
-                    percent = (
-                        (frames_processed / metadata.total_frames) * 100.0
-                        if metadata.total_frames > 0
-                        else 0.0
-                    )
-                    callbacks.on_progress(
-                        {
-                            "frame_index": frames_processed,
-                            "total_frames": metadata.total_frames,
-                            "percent": percent,
-                            "stage": "converting",
-                        }
-                    )
+                _emit_progress(frames_processed)
                 _emit_preview(sbs_frame)
 
         def _run_parallel_frames() -> None:
-            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed
+            nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed, frames_processed_this_run
 
             stereo_backend = select_stereo_synthesis_backend(config.device)
+            queue_config = resolve_parallel_queue_config(config)
+            if callbacks and callbacks.on_status:
+                callbacks.on_status(
+                    "Parallel runtime: "
+                    f"queue={queue_config.decode_queue_size}, stereo_backend={stereo_backend.name}"
+                )
 
             def _read_frame() -> np.ndarray | None:
                 nonlocal decode_time
@@ -291,19 +390,39 @@ def run_conversion(
                 return sbs_frame_payload
 
             def _write_frame(_frame_index: int, sbs_frame_payload: np.ndarray) -> None:
-                nonlocal encode_time, frames_processed
+                nonlocal encode_time, frames_processed, frames_processed_this_run
                 encode_started = perf_counter()
                 write_raw_frame(writer, sbs_frame_payload)
                 with timing_lock:
                     encode_time += perf_counter() - encode_started
                 frames_processed += 1
+                frames_processed_this_run += 1
                 progress.update(1)
                 _emit_preview(sbs_frame_payload)
+
+            def _on_parallel_progress(payload: dict[str, Any]) -> None:
+                if callbacks is None or callbacks.on_progress is None:
+                    return
+                current_written = int(payload.get("frame_index", 0))
+                absolute_frame = resume_start_frame + current_written
+                percent = (
+                    (absolute_frame / metadata.total_frames) * 100.0
+                    if metadata.total_frames > 0
+                    else 0.0
+                )
+                callbacks.on_progress(
+                    {
+                        "frame_index": absolute_frame,
+                        "total_frames": metadata.total_frames,
+                        "percent": percent,
+                        "stage": str(payload.get("stage", "converting")),
+                    }
+                )
 
             parallel_callbacks = None
             if callbacks is not None:
                 parallel_callbacks = ConversionCallbacks(
-                    on_progress=callbacks.on_progress,
+                    on_progress=_on_parallel_progress,
                     should_cancel=callbacks.should_cancel,
                 )
 
@@ -313,44 +432,80 @@ def run_conversion(
                 synthesize_stereo=_synthesize_stereo,
                 compose_sbs=_compose_sbs,
                 write_frame=_write_frame,
+                queue_config=queue_config,
                 callbacks=parallel_callbacks,
                 total_frames=metadata.total_frames,
             )
-            frames_processed = max(
-                frames_processed,
-                int(parallel_result.get("frames_written", frames_processed)),
-            )
+            current_frames = int(parallel_result.get("frames_written", frames_processed_this_run))
+            frames_processed_this_run = max(frames_processed_this_run, current_frames)
+            frames_processed = max(frames_processed, resume_start_frame + current_frames)
 
         processing_started = perf_counter()
         try:
+            if resume_start_frame > 0:
+                _skip_frames_to_resume(resume_start_frame)
             if use_parallel:
                 _run_parallel_frames()
             else:
                 _run_sequential_frames()
+        except ConversionCancelledError as exc:
+            conversion_canceled = True
+            pending_error = exc
         except KeyboardInterrupt as exc:
-            conversion_failed = True
-            raise ConversionCancelledError("Conversion interrupted by user.") from exc
+            conversion_canceled = True
+            pending_error = ConversionCancelledError("Conversion interrupted by user.")
         except (BrokenPipeError, VideoIOError) as exc:
-            conversion_failed = True
-            raise RuntimeError(f"Frame pipeline failed: {exc}") from exc
-        except Exception:
-            conversion_failed = True
-            raise
+            pending_error = RuntimeError(f"Frame pipeline failed: {exc}")
+        except Exception as exc:
+            pending_error = exc
         finally:
             processing_elapsed = perf_counter() - processing_started
             progress.close()
             try:
                 close_reader(reader)
             except (FFmpegError, BrokenPipeError):
-                if not conversion_failed:
+                if pending_error is None:
                     raise
             try:
                 close_writer(writer)
             except (FFmpegError, BrokenPipeError):
-                if not conversion_failed:
+                if pending_error is None:
                     raise
-            if conversion_failed and not config.keep_temp and silent_output.exists():
-                silent_output.unlink()
+
+        if frames_processed_this_run > 0:
+            append_segment(
+                checkpoint_root,
+                manifest,
+                current_segment_name,
+                frames_written=frames_processed_this_run,
+                status="canceled" if pending_error is not None else "running",
+            )
+        else:
+            if pending_error is not None and current_segment_path.exists():
+                current_segment_path.unlink()
+            manifest.status = "canceled" if pending_error is not None else manifest.status
+            save_manifest(checkpoint_root, manifest)
+
+        if pending_error is not None:
+            if callbacks and callbacks.on_status:
+                callbacks.on_status(
+                    f"Progress saved to progress/{checkpoint_id} at frame {manifest.next_frame_index}."
+                )
+            raise pending_error
+
+        segment_paths = [checkpoint_dir / item for item in manifest.segments]
+        if segment_paths:
+            concat_video_segments(
+                segments=segment_paths,
+                destination=silent_output,
+                overwrite=True,
+            )
+        elif current_segment_path.exists():
+            shutil.move(str(current_segment_path), str(silent_output))
+        else:
+            silent_output.touch()
+        manifest.status = "complete"
+        save_manifest(checkpoint_root, manifest)
 
         if metadata.has_audio:
             mux_audio_track(
@@ -383,21 +538,23 @@ def run_conversion(
                     callbacks.on_status(f"Compatibility warning: {warning}")
 
         effective_fps = 0.0
-        if frames_processed > 0:
+        if frames_processed_this_run > 0:
             if use_parallel:
-                fps = frames_processed / max(1e-6, processing_elapsed)
+                fps = frames_processed_this_run / max(1e-6, processing_elapsed)
             else:
-                fps = frames_processed / max(1e-6, decode_time + depth_time + stereo_time + encode_time)
+                fps = frames_processed_this_run / max(
+                    1e-6, decode_time + depth_time + stereo_time + encode_time
+                )
             effective_fps = fps
             summary_message = (
                 "Runtime summary: "
                 f"profile={config.profile}, perf_mode={config.perf_mode}, "
                 f"encoder={writer_codec}, depth_scale={runtime_plan.depth_process_scale:.2f}, "
-                f"frames={frames_processed}, effective_fps={fps:.2f}, "
-                f"decode_ms={decode_time * 1000 / frames_processed:.2f}, "
-                f"depth_ms={depth_time * 1000 / frames_processed:.2f}, "
-                f"stereo_ms={stereo_time * 1000 / frames_processed:.2f}, "
-                f"encode_ms={encode_time * 1000 / frames_processed:.2f}"
+                f"frames={frames_processed_this_run}, effective_fps={fps:.2f}, "
+                f"decode_ms={decode_time * 1000 / frames_processed_this_run:.2f}, "
+                f"depth_ms={depth_time * 1000 / frames_processed_this_run:.2f}, "
+                f"stereo_ms={stereo_time * 1000 / frames_processed_this_run:.2f}, "
+                f"encode_ms={encode_time * 1000 / frames_processed_this_run:.2f}"
             )
             print(summary_message)
             if callbacks and callbacks.on_status:

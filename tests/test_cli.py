@@ -64,6 +64,8 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
             "0.75",
             "--edge-protect-strength",
             "0.85",
+            "--parallel-queue-size",
+            "10",
             "--overwrite",
         ]
     )
@@ -74,6 +76,7 @@ def test_build_config_supports_profile_and_perf_mode(tmp_path: Path) -> None:
     assert config.max_disparity_px == 16
     assert config.depth_process_scale == 0.75
     assert config.edge_protect_strength == 0.85
+    assert config.parallel_queue_size == 10
 
 
 def test_build_config_defaults_to_strict_compatibility(tmp_path: Path) -> None:
