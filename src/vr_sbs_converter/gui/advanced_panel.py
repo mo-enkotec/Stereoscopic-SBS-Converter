@@ -72,12 +72,6 @@ class AdvancedPanel(QWidget):
         self.parallel_queue_size.setRange(0, 256)
         self.parallel_queue_size.setSpecialValueText("auto")
         self.parallel_queue_size.setValue(0)
-        self.gpu_batch_size = QSpinBox()
-        self.gpu_batch_size.setRange(0, 64)
-        self.gpu_batch_size.setSpecialValueText("auto")
-        self.gpu_batch_size.setValue(0)
-        self.gpu_stream_overlap = QCheckBox("Enable GPU stream overlap")
-        self.gpu_stream_overlap.setChecked(True)
 
         self.overwrite = QCheckBox("Overwrite output if exists")
         self.overwrite.setChecked(True)
@@ -102,8 +96,6 @@ class AdvancedPanel(QWidget):
         layout.addRow("Edge protect strength", self.edge_protect_strength)
         layout.addRow("Stereo strength", self.stereo_strength)
         layout.addRow("Parallel queue size", self.parallel_queue_size)
-        layout.addRow("GPU batch size", self.gpu_batch_size)
-        layout.addRow("", self.gpu_stream_overlap)
         layout.addRow("", self.overwrite)
         layout.addRow("", self.keep_temp)
         layout.addRow("Temp directory", self.temp_dir)
@@ -131,8 +123,6 @@ class AdvancedPanel(QWidget):
             "parallel_queue_size": (
                 self.parallel_queue_size.value() if self.parallel_queue_size.value() > 0 else None
             ),
-            "gpu_batch_size": self.gpu_batch_size.value() if self.gpu_batch_size.value() > 0 else None,
-            "gpu_stream_overlap": self.gpu_stream_overlap.isChecked(),
             "overwrite": self.overwrite.isChecked(),
             "keep_temp": self.keep_temp.isChecked(),
             "temp_dir": Path(temp_dir_value).expanduser() if temp_dir_value else None,

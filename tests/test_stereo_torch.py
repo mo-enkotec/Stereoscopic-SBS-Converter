@@ -10,8 +10,6 @@ from vr_sbs_converter.stereo_torch import (
     _import_torch,
     is_torch_cuda_stereo_available,
     select_stereo_synthesis_backend,
-    synthesize_stereo_views_torch,
-    synthesize_stereo_views_torch_batch,
 )
 
 
@@ -205,44 +203,3 @@ def test_forward_warp_fails_fast_without_scatter_reduce(monkeypatch: pytest.Monk
 def test_forward_warp_has_no_python_tolist_fallback() -> None:
     source = inspect.getsource(_forward_warp_eye_torch)
     assert ".tolist(" not in source
-
-
-def test_torch_batch_stereo_returns_empty_for_empty_input() -> None:
-    assert synthesize_stereo_views_torch_batch([], [], stereo_strength=0.8) == []
-
-
-def test_torch_batch_stereo_matches_single_call_envelope_or_skips() -> None:
-    if not is_torch_cuda_stereo_available():
-        pytest.skip("torch+cuda stereo backend unavailable")
-
-    frame_a, depth_a = _sample_inputs()
-    frame_b = np.roll(frame_a, shift=2, axis=1)
-    depth_b = np.roll(depth_a, shift=1, axis=1)
-    frames = [frame_a, frame_b]
-    depths = [depth_a, depth_b]
-
-    batch_results = synthesize_stereo_views_torch_batch(
-        frames,
-        depths,
-        stereo_strength=0.8,
-        max_disparity_px=8,
-    )
-    single_results = [
-        synthesize_stereo_views_torch(frame, depth, stereo_strength=0.8, max_disparity_px=8)
-        for frame, depth in zip(frames, depths, strict=True)
-    ]
-
-    assert len(batch_results) == len(single_results)
-    for (batch_left, batch_right), (single_left, single_right) in zip(
-        batch_results,
-        single_results,
-        strict=True,
-    ):
-        assert batch_left.shape == single_left.shape
-        assert batch_right.shape == single_right.shape
-        assert batch_left.dtype == single_left.dtype
-        assert batch_right.dtype == single_right.dtype
-        left_diff = np.abs(batch_left.astype(np.int16) - single_left.astype(np.int16))
-        right_diff = np.abs(batch_right.astype(np.int16) - single_right.astype(np.int16))
-        assert float(left_diff.mean()) <= 1.0
-        assert float(right_diff.mean()) <= 1.0

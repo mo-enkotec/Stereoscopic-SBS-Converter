@@ -64,8 +64,6 @@ def test_build_advanced_config_honors_option_overrides() -> None:
             "audio_fallback": "copy-aac",
             "stereo_strength": 0.7,
             "parallel_queue_size": 14,
-            "gpu_batch_size": 3,
-            "gpu_stream_overlap": False,
             "overwrite": True,
         },
     )
@@ -77,8 +75,6 @@ def test_build_advanced_config_honors_option_overrides() -> None:
     assert config.depth_backend == "luma"
     assert config.device == "cuda"
     assert config.parallel_queue_size == 14
-    assert config.gpu_batch_size == 3
-    assert config.gpu_stream_overlap is False
 
 
 def test_simple_panel_state_does_not_include_frame_preview_flag() -> None:
@@ -108,21 +104,3 @@ def test_advanced_panel_queue_size_defaults_to_auto_none() -> None:
     state = panel.get_state()
 
     assert state["parallel_queue_size"] is None
-
-
-def test_advanced_panel_gpu_stream_overlap_defaults_true() -> None:
-    _ensure_app()
-    panel = AdvancedPanel()
-
-    state = panel.get_state()
-
-    assert state["gpu_stream_overlap"] is True
-
-
-def test_advanced_panel_gpu_batch_size_defaults_to_auto_none() -> None:
-    _ensure_app()
-    panel = AdvancedPanel()
-
-    state = panel.get_state()
-
-    assert state["gpu_batch_size"] is None

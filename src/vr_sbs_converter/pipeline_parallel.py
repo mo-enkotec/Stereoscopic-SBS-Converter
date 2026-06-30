@@ -4,15 +4,10 @@ from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import perf_counter
-from typing import Any, Callable, Protocol, TypeAlias
+from typing import Any, Callable, Protocol
 
 END_OF_STREAM_FRAME_INDEX = -1
 _QUEUE_TIMEOUT_SECONDS = 0.05
-
-FramePayload: TypeAlias = Any
-DepthPayload: TypeAlias = Any
-StereoPayload: TypeAlias = Any
-SbsPayload: TypeAlias = Any
 
 
 @dataclass(slots=True)
@@ -39,21 +34,6 @@ class FramePacket:
             return
         if self.frame_index < 0:
             raise ValueError("Frame packets must use a non-negative frame index.")
-
-
-@dataclass(frozen=True, slots=True)
-class DepthFramePayload:
-    frame_payload: FramePayload
-    depth_payload: DepthPayload
-
-
-DepthWorkerOutputPayload: TypeAlias = DepthPayload | DepthFramePayload
-EstimateDepthFn: TypeAlias = Callable[[FramePayload], DepthWorkerOutputPayload]
-EstimateDepthBatchFn: TypeAlias = Callable[[list[FramePayload]], list[DepthWorkerOutputPayload]]
-SynthesizeStereoFn: TypeAlias = Callable[[FramePayload, DepthPayload], StereoPayload]
-SynthesizeStereoBatchFn: TypeAlias = Callable[[list[FramePayload], list[DepthPayload]], list[StereoPayload]]
-ComposeSbsFn: TypeAlias = Callable[[StereoPayload], SbsPayload]
-WriteFrameFn: TypeAlias = Callable[[int, SbsPayload], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,53 +225,6 @@ class ParallelCallbacks(Protocol):
     should_cancel: Callable[[], bool] | None
 
 
-class ParallelTelemetry:
-    def __init__(self) -> None:
-        self._queue_max_depth: dict[str, int] = {
-            "decode": 0,
-            "depth": 0,
-            "stereo": 0,
-            "encode": 0,
-        }
-        self._depth_batch_histogram: dict[int, int] = {}
-        self._stereo_batch_histogram: dict[int, int] = {}
-        self._lock = Lock()
-
-    def observe_queue_depth(self, queue_name: str, depth: int) -> None:
-        with self._lock:
-            previous = self._queue_max_depth.get(queue_name, 0)
-            if depth > previous:
-                self._queue_max_depth[queue_name] = depth
-
-    def observe_depth_batch(self, batch_size: int) -> None:
-        with self._lock:
-            self._depth_batch_histogram[batch_size] = self._depth_batch_histogram.get(batch_size, 0) + 1
-
-    def observe_stereo_batch(self, batch_size: int) -> None:
-        with self._lock:
-            self._stereo_batch_histogram[batch_size] = self._stereo_batch_histogram.get(batch_size, 0) + 1
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            depth_histogram = dict(sorted(self._depth_batch_histogram.items()))
-            depth_batches = sum(depth_histogram.values())
-            depth_frames = sum(size * count for size, count in depth_histogram.items())
-            depth_batch_avg = depth_frames / depth_batches if depth_batches > 0 else 0.0
-            stereo_histogram = dict(sorted(self._stereo_batch_histogram.items()))
-            stereo_batches = sum(stereo_histogram.values())
-            stereo_frames = sum(size * count for size, count in stereo_histogram.items())
-            stereo_batch_avg = stereo_frames / stereo_batches if stereo_batches > 0 else 0.0
-            return {
-                "queue_max_depth": dict(self._queue_max_depth),
-                "depth_batch_histogram": depth_histogram,
-                "depth_batches": depth_batches,
-                "depth_batch_avg": depth_batch_avg,
-                "stereo_batch_histogram": stereo_histogram,
-                "stereo_batches": stereo_batches,
-                "stereo_batch_avg": stereo_batch_avg,
-            }
-
-
 def _put_with_backpressure(
     output_queue: Queue[FramePacket],
     packet: FramePacket,
@@ -332,11 +265,10 @@ def _get_with_backpressure(
 
 def decode_worker(
     *,
-    read_frame: Callable[[], FramePayload | None],
+    read_frame: Callable[[], Any | None],
     output_queue: Queue[FramePacket],
     failure_state: ParallelFailureState,
     cancel_event: Event,
-    telemetry: ParallelTelemetry | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> int:
     frame_index = 0
@@ -352,14 +284,12 @@ def decode_worker(
             decode_elapsed_ms = (perf_counter() - decode_started) * 1000.0
             if frame_payload is None:
                 sentinel = create_end_of_stream_packet(stage="decode")
-                forwarded = _put_with_backpressure(
+                _put_with_backpressure(
                     output_queue,
                     sentinel,
                     cancel_event=cancel_event,
                     should_cancel=should_cancel,
                 )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("decode", output_queue.qsize())
                 return frame_index
             packet = FramePacket(
                 frame_index=frame_index,
@@ -374,8 +304,6 @@ def decode_worker(
                 should_cancel=should_cancel,
             ):
                 return frame_index
-            if telemetry is not None:
-                telemetry.observe_queue_depth("decode", output_queue.qsize())
             frame_index += 1
     except BaseException as exc:
         failure_state.record(exc, stage="decode", frame_index=frame_index)
@@ -386,17 +314,11 @@ def depth_worker(
     *,
     input_queue: Queue[FramePacket],
     output_queue: Queue[FramePacket],
-    estimate_depth: EstimateDepthFn,
-    estimate_depth_batch: EstimateDepthBatchFn | None,
-    depth_batch_size: int,
+    estimate_depth: Callable[[Any], Any],
     failure_state: ParallelFailureState,
     cancel_event: Event,
-    telemetry: ParallelTelemetry | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> int:
-    if depth_batch_size <= 0:
-        raise ValueError("depth_batch_size must be positive.")
-
     processed = 0
     try:
         while True:
@@ -408,76 +330,33 @@ def depth_worker(
             if packet is None:
                 return processed
             if packet.is_end_of_stream:
-                forwarded = _put_with_backpressure(
+                _put_with_backpressure(
                     output_queue,
                     create_end_of_stream_packet(stage="depth"),
                     cancel_event=cancel_event,
                     should_cancel=should_cancel,
                 )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("depth", output_queue.qsize())
                 return processed
-
-            batch_packets: list[FramePacket] = [packet]
-            saw_eos = False
-            while len(batch_packets) < depth_batch_size:
-                try:
-                    maybe_packet = input_queue.get_nowait()
-                except Empty:
-                    break
-                if maybe_packet.is_end_of_stream:
-                    saw_eos = True
-                    break
-                batch_packets.append(maybe_packet)
-            if telemetry is not None:
-                telemetry.observe_depth_batch(len(batch_packets))
-
             depth_started = perf_counter()
-            if estimate_depth_batch is not None:
-                batch_depth_payloads = estimate_depth_batch([item.frame_payload for item in batch_packets])
-                if len(batch_depth_payloads) != len(batch_packets):
-                    raise RuntimeError("estimate_depth_batch returned mismatched batch size.")
-            else:
-                batch_depth_payloads = [estimate_depth(item.frame_payload) for item in batch_packets]
+            depth_payload = estimate_depth(packet.frame_payload)
             depth_elapsed_ms = (perf_counter() - depth_started) * 1000.0
-            depth_elapsed_ms_per_frame = depth_elapsed_ms / len(batch_packets)
-
-            for batch_packet, depth_payload in zip(batch_packets, batch_depth_payloads, strict=True):
-                output_frame_payload = batch_packet.frame_payload
-                output_depth_payload = depth_payload
-                if isinstance(depth_payload, DepthFramePayload):
-                    output_frame_payload = depth_payload.frame_payload
-                    output_depth_payload = depth_payload.depth_payload
-                stage_timings_ms = dict(batch_packet.stage_timings_ms)
-                stage_timings_ms["depth"] = depth_elapsed_ms_per_frame
-                output_packet = FramePacket(
-                    frame_index=batch_packet.frame_index,
-                    frame_payload=output_frame_payload,
-                    depth_payload=output_depth_payload,
-                    stage_timings_ms=stage_timings_ms,
-                    stage="depth",
-                )
-                if not _put_with_backpressure(
-                    output_queue,
-                    output_packet,
-                    cancel_event=cancel_event,
-                    should_cancel=should_cancel,
-                ):
-                    return processed
-                if telemetry is not None:
-                    telemetry.observe_queue_depth("depth", output_queue.qsize())
-                processed += 1
-
-            if saw_eos:
-                forwarded = _put_with_backpressure(
-                    output_queue,
-                    create_end_of_stream_packet(stage="depth"),
-                    cancel_event=cancel_event,
-                    should_cancel=should_cancel,
-                )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("depth", output_queue.qsize())
+            stage_timings_ms = dict(packet.stage_timings_ms)
+            stage_timings_ms["depth"] = depth_elapsed_ms
+            output_packet = FramePacket(
+                frame_index=packet.frame_index,
+                frame_payload=packet.frame_payload,
+                depth_payload=depth_payload,
+                stage_timings_ms=stage_timings_ms,
+                stage="depth",
+            )
+            if not _put_with_backpressure(
+                output_queue,
+                output_packet,
+                cancel_event=cancel_event,
+                should_cancel=should_cancel,
+            ):
                 return processed
+            processed += 1
     except BaseException as exc:
         frame_index = packet.frame_index if "packet" in locals() and not packet.is_end_of_stream else None
         failure_state.record(exc, stage="depth", frame_index=frame_index)
@@ -488,12 +367,9 @@ def stereo_worker(
     *,
     input_queue: Queue[FramePacket],
     output_queue: Queue[FramePacket],
-    synthesize_stereo: SynthesizeStereoFn,
-    synthesize_stereo_batch: SynthesizeStereoBatchFn | None,
-    stereo_batch_size: int,
+    synthesize_stereo: Callable[[Any, Any], Any],
     failure_state: ParallelFailureState,
     cancel_event: Event,
-    telemetry: ParallelTelemetry | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> int:
     processed = 0
@@ -507,77 +383,34 @@ def stereo_worker(
             if packet is None:
                 return processed
             if packet.is_end_of_stream:
-                forwarded = _put_with_backpressure(
+                _put_with_backpressure(
                     output_queue,
                     create_end_of_stream_packet(stage="stereo"),
                     cancel_event=cancel_event,
                     should_cancel=should_cancel,
                 )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("stereo", output_queue.qsize())
                 return processed
-
-            batch_packets: list[FramePacket] = [packet]
-            saw_eos = False
-            while len(batch_packets) < stereo_batch_size:
-                try:
-                    maybe_packet = input_queue.get_nowait()
-                except Empty:
-                    break
-                if maybe_packet.is_end_of_stream:
-                    saw_eos = True
-                    break
-                batch_packets.append(maybe_packet)
-            if telemetry is not None:
-                telemetry.observe_stereo_batch(len(batch_packets))
-
             stereo_started = perf_counter()
-            if synthesize_stereo_batch is not None:
-                batch_stereo_payloads = synthesize_stereo_batch(
-                    [item.frame_payload for item in batch_packets],
-                    [item.depth_payload for item in batch_packets],
-                )
-                if len(batch_stereo_payloads) != len(batch_packets):
-                    raise RuntimeError("synthesize_stereo_batch returned mismatched batch size.")
-            else:
-                batch_stereo_payloads = [
-                    synthesize_stereo(item.frame_payload, item.depth_payload) for item in batch_packets
-                ]
+            stereo_payload = synthesize_stereo(packet.frame_payload, packet.depth_payload)
             stereo_elapsed_ms = (perf_counter() - stereo_started) * 1000.0
-            stereo_elapsed_ms_per_frame = stereo_elapsed_ms / len(batch_packets)
-
-            for batch_packet, stereo_payload in zip(batch_packets, batch_stereo_payloads, strict=True):
-                stage_timings_ms = dict(batch_packet.stage_timings_ms)
-                stage_timings_ms["stereo"] = stereo_elapsed_ms_per_frame
-                output_packet = FramePacket(
-                    frame_index=batch_packet.frame_index,
-                    frame_payload=None,
-                    depth_payload=None,
-                    stereo_payload=stereo_payload,
-                    stage_timings_ms=stage_timings_ms,
-                    stage="stereo",
-                )
-                if not _put_with_backpressure(
-                    output_queue,
-                    output_packet,
-                    cancel_event=cancel_event,
-                    should_cancel=should_cancel,
-                ):
-                    return processed
-                if telemetry is not None:
-                    telemetry.observe_queue_depth("stereo", output_queue.qsize())
-                processed += 1
-
-            if saw_eos:
-                forwarded = _put_with_backpressure(
-                    output_queue,
-                    create_end_of_stream_packet(stage="stereo"),
-                    cancel_event=cancel_event,
-                    should_cancel=should_cancel,
-                )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("stereo", output_queue.qsize())
+            stage_timings_ms = dict(packet.stage_timings_ms)
+            stage_timings_ms["stereo"] = stereo_elapsed_ms
+            output_packet = FramePacket(
+                frame_index=packet.frame_index,
+                frame_payload=packet.frame_payload,
+                depth_payload=packet.depth_payload,
+                stereo_payload=stereo_payload,
+                stage_timings_ms=stage_timings_ms,
+                stage="stereo",
+            )
+            if not _put_with_backpressure(
+                output_queue,
+                output_packet,
+                cancel_event=cancel_event,
+                should_cancel=should_cancel,
+            ):
                 return processed
+            processed += 1
     except BaseException as exc:
         frame_index = packet.frame_index if "packet" in locals() and not packet.is_end_of_stream else None
         failure_state.record(exc, stage="stereo", frame_index=frame_index)
@@ -588,10 +421,9 @@ def encode_worker(
     *,
     input_queue: Queue[FramePacket],
     output_queue: Queue[FramePacket],
-    compose_sbs: ComposeSbsFn,
+    compose_sbs: Callable[[Any], Any],
     failure_state: ParallelFailureState,
     cancel_event: Event,
-    telemetry: ParallelTelemetry | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> int:
     processed = 0
@@ -605,14 +437,12 @@ def encode_worker(
             if packet is None:
                 return processed
             if packet.is_end_of_stream:
-                forwarded = _put_with_backpressure(
+                _put_with_backpressure(
                     output_queue,
                     create_end_of_stream_packet(stage="encode"),
                     cancel_event=cancel_event,
                     should_cancel=should_cancel,
                 )
-                if forwarded and telemetry is not None:
-                    telemetry.observe_queue_depth("encode", output_queue.qsize())
                 return processed
             encode_started = perf_counter()
             sbs_payload = compose_sbs(packet.stereo_payload)
@@ -621,9 +451,9 @@ def encode_worker(
             stage_timings_ms["encode"] = encode_elapsed_ms
             output_packet = FramePacket(
                 frame_index=packet.frame_index,
-                frame_payload=None,
-                depth_payload=None,
-                stereo_payload=None,
+                frame_payload=packet.frame_payload,
+                depth_payload=packet.depth_payload,
+                stereo_payload=packet.stereo_payload,
                 sbs_payload=sbs_payload,
                 stage_timings_ms=stage_timings_ms,
                 stage="encode",
@@ -635,8 +465,6 @@ def encode_worker(
                 should_cancel=should_cancel,
             ):
                 return processed
-            if telemetry is not None:
-                telemetry.observe_queue_depth("encode", output_queue.qsize())
             processed += 1
     except BaseException as exc:
         frame_index = packet.frame_index if "packet" in locals() and not packet.is_end_of_stream else None
@@ -647,7 +475,7 @@ def encode_worker(
 def encode_coordinator_worker(
     *,
     input_queue: Queue[FramePacket],
-    write_frame: WriteFrameFn,
+    write_frame: Callable[[int, Any], None],
     failure_state: ParallelFailureState,
     cancel_event: Event,
     callbacks: ParallelCallbacks | None = None,
@@ -699,15 +527,11 @@ def _create_cancelled_error() -> RuntimeError:
 
 def run_parallel_conversion_configured(
     *,
-    read_frame: Callable[[], FramePayload | None],
-    estimate_depth: EstimateDepthFn,
-    synthesize_stereo: SynthesizeStereoFn,
-    compose_sbs: ComposeSbsFn,
-    write_frame: WriteFrameFn,
-    estimate_depth_batch: EstimateDepthBatchFn | None = None,
-    depth_batch_size: int = 1,
-    synthesize_stereo_batch: SynthesizeStereoBatchFn | None = None,
-    stereo_batch_size: int = 1,
+    read_frame: Callable[[], Any | None],
+    estimate_depth: Callable[[Any], Any],
+    synthesize_stereo: Callable[[Any, Any], Any],
+    compose_sbs: Callable[[Any], Any],
+    write_frame: Callable[[int, Any], None],
     queue_config: ParallelQueueConfig = DEFAULT_QUEUE_CONFIG,
     callbacks: ParallelCallbacks | None = None,
     total_frames: int | None = None,
@@ -715,14 +539,8 @@ def run_parallel_conversion_configured(
 ) -> dict[str, Any]:
     """Run a deterministic parallel conversion flow with injected stage callables."""
 
-    if depth_batch_size < 1:
-        raise ValueError("depth_batch_size must be >= 1")
-    if stereo_batch_size < 1:
-        raise ValueError("stereo_batch_size must be >= 1")
-
     shared_cancel_event = cancel_event or create_cancel_event()
     failure_state = ParallelFailureState(cancel_event=shared_cancel_event)
-    telemetry = ParallelTelemetry()
     queues = create_bounded_queues(queue_config)
 
     if callbacks is not None and callbacks.on_start is not None:
@@ -743,7 +561,6 @@ def run_parallel_conversion_configured(
                 "output_queue": queues.decode,
                 "failure_state": failure_state,
                 "cancel_event": shared_cancel_event,
-                "telemetry": telemetry,
                 "should_cancel": None,
             },
             name="parallel-decode-worker",
@@ -754,11 +571,8 @@ def run_parallel_conversion_configured(
                 "input_queue": queues.decode,
                 "output_queue": queues.depth,
                 "estimate_depth": estimate_depth,
-                "estimate_depth_batch": estimate_depth_batch,
-                "depth_batch_size": depth_batch_size,
                 "failure_state": failure_state,
                 "cancel_event": shared_cancel_event,
-                "telemetry": telemetry,
                 "should_cancel": None,
             },
             name="parallel-depth-worker",
@@ -769,11 +583,8 @@ def run_parallel_conversion_configured(
                 "input_queue": queues.depth,
                 "output_queue": queues.stereo,
                 "synthesize_stereo": synthesize_stereo,
-                "synthesize_stereo_batch": synthesize_stereo_batch,
-                "stereo_batch_size": stereo_batch_size,
                 "failure_state": failure_state,
                 "cancel_event": shared_cancel_event,
-                "telemetry": telemetry,
                 "should_cancel": None,
             },
             name="parallel-stereo-worker",
@@ -786,7 +597,6 @@ def run_parallel_conversion_configured(
                 "compose_sbs": compose_sbs,
                 "failure_state": failure_state,
                 "cancel_event": shared_cancel_event,
-                "telemetry": telemetry,
                 "should_cancel": None,
             },
             name="parallel-encode-worker",
@@ -829,7 +639,6 @@ def run_parallel_conversion_configured(
                 "frames_processed": coordinator_result["frames_written"],
                 "effective_fps": 0.0,
                 "mode": "parallel",
-                "telemetry": telemetry.snapshot(),
             }
         )
 
@@ -838,5 +647,4 @@ def run_parallel_conversion_configured(
         "all_workers_joined": all_workers_joined,
         "failure": failure,
         "cancel_requested": is_cancel_requested(shared_cancel_event),
-        "telemetry": telemetry.snapshot(),
     }

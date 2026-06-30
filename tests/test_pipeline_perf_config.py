@@ -1,13 +1,7 @@
 from pathlib import Path
 
 from vr_sbs_converter.config import ConversionConfig
-from vr_sbs_converter.pipeline import (
-    _cap_cuda_batch_size_for_resolution,
-    _cap_gpu_depth_queue,
-    resolve_parallel_queue_config,
-    resolve_runtime_plan,
-)
-from vr_sbs_converter.pipeline_parallel import ParallelQueueConfig
+from vr_sbs_converter.pipeline import resolve_parallel_queue_config, resolve_runtime_plan
 
 
 def test_gpu_balanced_profile_sets_depth_scale_and_encoder() -> None:
@@ -100,41 +94,3 @@ def test_resolve_parallel_queue_config_respects_override() -> None:
     assert queue_config.depth_queue_size == 16
     assert queue_config.stereo_queue_size == 16
     assert queue_config.encode_queue_size == 16
-
-
-def test_cap_gpu_depth_queue_limits_depth_stage_to_two() -> None:
-    queue_config = ParallelQueueConfig(
-        decode_queue_size=12,
-        depth_queue_size=12,
-        stereo_queue_size=12,
-        encode_queue_size=12,
-    )
-
-    capped = _cap_gpu_depth_queue(queue_config)
-
-    assert capped.decode_queue_size == 12
-    assert capped.depth_queue_size == 2
-    assert capped.stereo_queue_size == 12
-    assert capped.encode_queue_size == 12
-
-
-def test_cap_gpu_depth_queue_keeps_small_depth_queue() -> None:
-    queue_config = ParallelQueueConfig(
-        decode_queue_size=4,
-        depth_queue_size=1,
-        stereo_queue_size=4,
-        encode_queue_size=4,
-    )
-
-    capped = _cap_gpu_depth_queue(queue_config)
-    assert capped.depth_queue_size == 1
-
-
-def test_cap_cuda_batch_size_for_resolution_prefers_single_batch_on_1080p_plus() -> None:
-    assert _cap_cuda_batch_size_for_resolution(4, 1920, 1080) == 1
-    assert _cap_cuda_batch_size_for_resolution(4, 3840, 2160) == 1
-
-
-def test_cap_cuda_batch_size_for_resolution_allows_small_batches_for_low_res() -> None:
-    assert _cap_cuda_batch_size_for_resolution(4, 1280, 720) == 2
-    assert _cap_cuda_batch_size_for_resolution(4, 640, 360) == 4

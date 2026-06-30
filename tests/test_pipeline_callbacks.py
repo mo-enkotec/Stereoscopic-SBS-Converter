@@ -249,7 +249,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
             return np.ones(frame.shape[:2], dtype=np.float32)
 
     backend_calls: list[str] = []
-    backend_batch_calls: list[str] = []
     selected_backends: list[str] = []
 
     class _FakeBackend:
@@ -268,15 +267,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
     def _fake_parallel(**kwargs):
         sample = np.zeros((8, 8, 3), dtype=np.uint8)
         left_eye, right_eye = kwargs["synthesize_stereo"](sample, np.ones((8, 8), dtype=np.float32))
-        batch_payload = kwargs["synthesize_stereo_batch"](
-            [sample],
-            [np.ones((8, 8), dtype=np.float32)],
-        )
-        assert len(batch_payload) == 1
-        backend_batch_calls.append("torch-cuda")
-        assert kwargs["stereo_batch_size"] >= 1
-        assert kwargs["depth_batch_size"] <= kwargs["queue_config"].depth_queue_size
-        assert kwargs["stereo_batch_size"] <= kwargs["queue_config"].depth_queue_size
         sbs_frame = kwargs["compose_sbs"]((left_eye, right_eye))
         kwargs["write_frame"](0, sbs_frame)
         return {"frames_written": 1, "all_workers_joined": True, "failure": None, "cancel_requested": False}
@@ -306,12 +296,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
     monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
     monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
     monkeypatch.setattr(
-        "vr_sbs_converter.pipeline.synthesize_stereo_views_torch_batch",
-        lambda frames_bgr, depths, stereo_strength, max_disparity_px, stream_overlap=False: [
-            (frame, frame) for frame, _depth in zip(frames_bgr, depths, strict=True)
-        ],
-    )
-    monkeypatch.setattr(
         "vr_sbs_converter.pipeline.select_stereo_synthesis_backend",
         _fake_select_backend,
         raising=False,
@@ -331,7 +315,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
 
     assert selected_backends == ["cuda"]
     assert backend_calls == ["torch-cuda"]
-    assert backend_batch_calls == ["torch-cuda"]
 
 
 def test_run_conversion_parallel_cancel_does_not_emit_complete(monkeypatch, tmp_path: Path) -> None:
