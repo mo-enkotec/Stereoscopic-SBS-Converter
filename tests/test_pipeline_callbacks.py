@@ -306,10 +306,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
     monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
     monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
     monkeypatch.setattr(
-        "vr_sbs_converter.pipeline.importlib.import_module",
-        lambda module_name: object() if module_name == "torch" else __import__(module_name),
-    )
-    monkeypatch.setattr(
         "vr_sbs_converter.pipeline.synthesize_stereo_views_torch_batch",
         lambda frames_bgr, depths, stereo_strength, max_disparity_px, stream_overlap=False: [
             (frame, frame) for frame, _depth in zip(frames_bgr, depths, strict=True)
@@ -336,95 +332,6 @@ def test_run_conversion_parallel_path_uses_selected_stereo_backend(monkeypatch, 
     assert selected_backends == ["cuda"]
     assert backend_calls == ["torch-cuda"]
     assert backend_batch_calls == ["torch-cuda"]
-
-
-def test_run_conversion_quality_4k_bypasses_gpu_stereo_batching(monkeypatch, tmp_path: Path) -> None:
-    input_video = tmp_path / "in.mp4"
-    output_video = tmp_path / "out.mp4"
-    input_video.write_bytes(b"fake")
-
-    class _DummyEstimator:
-        def estimate(self, frame):
-            return np.ones(frame.shape[:2], dtype=np.float32)
-
-    selected_backends: list[str] = []
-
-    class _FakeCudaBackend:
-        name = "torch-cuda"
-
-        @staticmethod
-        def synthesize(frame_bgr, depth, stereo_strength, max_disparity_px):
-            _ = depth, stereo_strength, max_disparity_px
-            return frame_bgr, frame_bgr
-
-    class _FakeCpuBackend:
-        name = "cpu"
-
-        @staticmethod
-        def synthesize(frame_bgr, depth, stereo_strength, max_disparity_px):
-            _ = depth, stereo_strength, max_disparity_px
-            return frame_bgr, frame_bgr
-
-    def _fake_select_backend(device_preference: str, **_kwargs):
-        selected_backends.append(device_preference)
-        if device_preference == "cpu":
-            return _FakeCpuBackend()
-        return _FakeCudaBackend()
-
-    def _fake_parallel(**kwargs):
-        assert kwargs["synthesize_stereo_batch"] is None
-        sample = np.zeros((8, 8, 3), dtype=np.uint8)
-        left_eye, right_eye = kwargs["synthesize_stereo"](sample, np.ones((8, 8), dtype=np.float32))
-        sbs_frame = kwargs["compose_sbs"]((left_eye, right_eye))
-        kwargs["write_frame"](0, sbs_frame)
-        return {"frames_written": 1, "all_workers_joined": True, "failure": None, "cancel_requested": False}
-
-    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
-    monkeypatch.setattr(
-        "vr_sbs_converter.pipeline.probe_video",
-        lambda _path: VideoMetadata(
-            width=1920,
-            height=1080,
-            fps=24.0,
-            duration_seconds=0.0,
-            total_frames=1,
-            has_audio=False,
-        ),
-    )
-    monkeypatch.setattr("vr_sbs_converter.pipeline.create_depth_estimator", lambda *args, **kwargs: _DummyEstimator())
-    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
-    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
-    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
-    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
-    monkeypatch.setattr(
-        "vr_sbs_converter.pipeline.read_raw_frame",
-        lambda *_args, **_kwargs: next(frames),
-    )
-    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
-    monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
-    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
-    monkeypatch.setattr(
-        "vr_sbs_converter.pipeline.select_stereo_synthesis_backend",
-        _fake_select_backend,
-        raising=False,
-    )
-    monkeypatch.setattr("vr_sbs_converter.pipeline.run_parallel_conversion_configured", _fake_parallel, raising=False)
-
-    frames = iter([np.zeros((8, 8, 3), dtype=np.uint8), None])
-    config = ConversionConfig(
-        input_path=input_video,
-        output_path=output_video,
-        depth_backend="luma",
-        device="cuda",
-        perf_mode="quality",
-        upscale=True,
-        target_height=2160,
-        overwrite=True,
-        compat_profile="off",
-    )
-    run_conversion(config)
-
-    assert selected_backends == ["cuda", "cpu"]
 
 
 def test_run_conversion_parallel_cancel_does_not_emit_complete(monkeypatch, tmp_path: Path) -> None:

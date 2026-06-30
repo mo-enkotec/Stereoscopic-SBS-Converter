@@ -150,25 +150,6 @@ def _cap_cuda_batch_size_for_resolution(batch_size: int, width: int, height: int
     return batch_size
 
 
-def _should_enable_gpu_stereo(
-    *,
-    config: ConversionConfig,
-    stereo_backend_name: str,
-    effective_depth_batch_size: int,
-    width: int,
-    height: int,
-) -> bool:
-    if stereo_backend_name != "torch-cuda":
-        return False
-    if (
-        config.perf_mode == "quality"
-        and effective_depth_batch_size <= 1
-        and (width * height) >= (3840 * 2160)
-    ):
-        return False
-    return True
-
-
 def _progress_root() -> Path:
     return Path(__file__).resolve().parents[2] / "progress"
 
@@ -464,43 +445,21 @@ def run_conversion(
             queue_config = resolve_parallel_queue_config(config)
             depth_batch_size = resolve_gpu_batch_size(config)
             stereo_batch_size = depth_batch_size if stereo_backend_name == "torch-cuda" else 1
-            auto_bypass_reason = None
-            if stereo_backend_name == "torch-cuda":
-                if torch_module is None:
-                    use_gpu_stereo = False
-                    auto_bypass_reason = "torch_unavailable"
-                else:
-                    queue_config = _cap_gpu_depth_queue(queue_config)
-                    depth_batch_size = min(depth_batch_size, queue_config.depth_queue_size)
-                    depth_batch_size = _cap_cuda_batch_size_for_resolution(
-                        depth_batch_size,
-                        process_width,
-                        process_height,
-                    )
-                    stereo_batch_size = min(stereo_batch_size, queue_config.depth_queue_size, depth_batch_size)
-                    use_gpu_stereo = _should_enable_gpu_stereo(
-                        config=config,
-                        stereo_backend_name=stereo_backend_name,
-                        effective_depth_batch_size=depth_batch_size,
-                        width=process_width,
-                        height=process_height,
-                    )
-                    if not use_gpu_stereo:
-                        auto_bypass_reason = "quality_4k_low_batch"
-                if not use_gpu_stereo:
-                    stereo_backend = select_stereo_synthesis_backend("cpu")
-                    stereo_backend_name = "cpu"
-                    torch_module = None
-                    stereo_batch_size = 1
-            if callbacks and callbacks.on_status:
-                bypass_suffix = (
-                    f", auto_bypass={auto_bypass_reason}" if auto_bypass_reason is not None else ""
+            if stereo_backend_name == "torch-cuda" and torch_module is not None:
+                queue_config = _cap_gpu_depth_queue(queue_config)
+                depth_batch_size = min(depth_batch_size, queue_config.depth_queue_size)
+                depth_batch_size = _cap_cuda_batch_size_for_resolution(
+                    depth_batch_size,
+                    process_width,
+                    process_height,
                 )
+                stereo_batch_size = min(stereo_batch_size, queue_config.depth_queue_size, depth_batch_size)
+            if callbacks and callbacks.on_status:
                 callbacks.on_status(
                     "Parallel runtime: "
                     f"queue={queue_config.decode_queue_size}, "
                     f"depth_batch={depth_batch_size}, stereo_batch={stereo_batch_size}, "
-                    f"stereo_backend={stereo_backend_name}{bypass_suffix}"
+                    f"stereo_backend={stereo_backend_name}"
                 )
 
             def _read_frame() -> np.ndarray | None:

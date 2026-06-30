@@ -154,7 +154,6 @@ ETA is computed in the conversion pipeline and emitted to the GUI progress callb
 During conversion, the runtime also emits a live `Function timing top-5` status line every 2 seconds (frame-processing path only: decode/upscale/depth/stereo/compose/encode). Rankings are based on **average milliseconds per function call**.
 
 At completion, the runtime emits a `Function timing summary` line with the final top averages.
-
 In strict compatibility mode, the converter may print compatibility warnings after encoding if stream properties are likely to fail in stricter players.
 
 > Note: keeping full-SBS at very large dimensions (for example 7680x2160) can still exceed decoder limits on some devices even with compatible codec/pixel format settings.
