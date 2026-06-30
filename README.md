@@ -50,7 +50,7 @@ GUI highlights:
 - **Simple**: choose one overall profile preset and a strict compatibility toggle.
 - **Advanced**: expose all conversion controls (SBS mode, upscale target, profile/performance, depth/stereo knobs, encoder/compatibility/audio fallback, temp handling).
 
-The window auto-fits to the currently selected tab content by default and re-fits when switching between Simple and Advanced.
+The GUI keeps a stable default window width and auto-fits the window height to the currently selected tab content when switching between Simple and Advanced.
 
 ### Basic conversion (2D -> full SBS)
 

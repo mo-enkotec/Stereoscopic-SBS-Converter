@@ -27,9 +27,12 @@ from .worker import ConversionWorker
 
 
 class MainWindow(QMainWindow):
+    _DEFAULT_WINDOW_WIDTH = 1080
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("VR SBS Converter")
+        self._window_width = self._DEFAULT_WINDOW_WIDTH
 
         self._input_edit = QLineEdit()
         self._output_edit = QLineEdit()
@@ -223,7 +226,8 @@ class MainWindow(QMainWindow):
         central = self.centralWidget()
         if central is not None:
             central.adjustSize()
-        self.adjustSize()
+        target_height = self.sizeHint().height()
+        self.resize(self._window_width, target_height)
 
     @staticmethod
     def _format_eta(remaining_seconds: float | None) -> str:

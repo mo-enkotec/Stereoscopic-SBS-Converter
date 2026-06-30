@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication
 
 from vr_sbs_converter.gui.main_window import MainWindow
@@ -138,3 +139,29 @@ def test_main_window_auto_fits_on_tab_switch(monkeypatch) -> None:
     assert fit_calls
     assert 1 in fit_calls
     assert fit_calls[-1] == 0
+
+
+def test_main_window_auto_fit_preserves_width_and_resizes_height(monkeypatch) -> None:
+    _ensure_app()
+    window = MainWindow()
+
+    monkeypatch.setattr(window.centralWidget(), "adjustSize", lambda: None)
+    monkeypatch.setattr(
+        window,
+        "sizeHint",
+        lambda: QSize(
+            360 if window._tabs.currentIndex() == 0 else 920,
+            420 if window._tabs.currentIndex() == 0 else 760,
+        ),
+    )
+
+    window._tabs.setCurrentIndex(0)
+    simple_size = window.size()
+
+    window._tabs.setCurrentIndex(1)
+    advanced_size = window.size()
+
+    assert simple_size.width() == 1080
+    assert advanced_size.width() == 1080
+    assert simple_size.height() == 420
+    assert advanced_size.height() == 760
