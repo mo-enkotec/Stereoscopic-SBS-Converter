@@ -28,6 +28,7 @@ def build_simple_config(
     input_path: Path,
     output_path: Path,
     preset_key: str,
+    upscale_4k: bool,
 ) -> ConversionConfig:
     if preset_key not in SIMPLE_PRESETS:
         raise ValueError(f"Unknown simple preset '{preset_key}'.")
@@ -36,6 +37,8 @@ def build_simple_config(
     return ConversionConfig(
         input_path=input_path,
         output_path=output_path,
+        upscale=upscale_4k,
+        target_height=2160 if upscale_4k else None,
         profile=preset["profile"],  # type: ignore[arg-type]
         perf_mode=preset["perf_mode"],  # type: ignore[arg-type]
         compat_profile="strict",

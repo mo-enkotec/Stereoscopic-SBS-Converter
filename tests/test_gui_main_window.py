@@ -45,6 +45,21 @@ def test_main_window_builds_simple_config_from_default_preset() -> None:
     assert config.profile == "halo-safe"
     assert config.perf_mode == "quality"
     assert config.compat_profile == "strict"
+    assert config.upscale is False
+    assert config.target_height is None
+
+
+def test_main_window_builds_simple_config_with_4k_upscale_toggle() -> None:
+    _ensure_app()
+    window = MainWindow()
+    window._input_edit.setText(str(Path("/tmp/in.mp4")))
+    window._output_edit.setText(str(Path("/tmp/out.mp4")))
+    window._simple_panel.upscale_4k_checkbox.setChecked(True)
+
+    config = window.build_config_from_ui()
+
+    assert config.upscale is True
+    assert config.target_height == 2160
 
 
 def test_main_window_builds_advanced_config_from_panel_values() -> None:
@@ -103,3 +118,20 @@ def test_main_window_progress_status_handles_unknown_eta() -> None:
     window._on_worker_progress({"percent": 0.0, "frame_index": 0, "total_frames": 0})
 
     assert window._status_label.text() == "Converting frame 0/0 • ETA --:--"
+
+
+def test_main_window_auto_fits_on_tab_switch(monkeypatch) -> None:
+    _ensure_app()
+    fit_calls: list[int] = []
+
+    def _fake_auto_fit(self) -> None:
+        fit_calls.append(self._tabs.currentIndex())
+
+    monkeypatch.setattr(MainWindow, "_auto_fit_window_to_current_tab", _fake_auto_fit, raising=False)
+    window = MainWindow()
+    window._tabs.setCurrentIndex(1)
+    window._tabs.setCurrentIndex(0)
+
+    assert fit_calls
+    assert 1 in fit_calls
+    assert fit_calls[-1] == 0

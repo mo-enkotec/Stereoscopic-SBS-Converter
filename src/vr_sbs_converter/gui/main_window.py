@@ -29,7 +29,6 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("VR SBS Converter")
-        self.resize(1080, 760)
 
         self._input_edit = QLineEdit()
         self._output_edit = QLineEdit()
@@ -54,6 +53,7 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.addTab(self._simple_panel, "Simple")
         self._tabs.addTab(self._advanced_panel, "Advanced")
+        self._tabs.currentChanged.connect(lambda _index: self._auto_fit_window_to_current_tab())
 
         self._log_output = QTextEdit()
         self._log_output.setReadOnly(True)
@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._progress_bar)
         layout.addWidget(self._status_label)
         self.setCentralWidget(root)
+        self._auto_fit_window_to_current_tab()
 
     @staticmethod
     def _build_path_row(label_text: str, edit: QLineEdit, browse_button: QPushButton) -> QHBoxLayout:
@@ -106,6 +107,7 @@ class MainWindow(QMainWindow):
                 input_path=input_path,
                 output_path=output_path,
                 preset_key=str(state["preset_key"]),
+                upscale_4k=bool(state.get("upscale_4k", False)),
             )
             config.compat_profile = str(state["compat_profile"])
             return config
@@ -205,6 +207,12 @@ class MainWindow(QMainWindow):
 
     def _append_status(self, message: str) -> None:
         self._log_output.append(message)
+
+    def _auto_fit_window_to_current_tab(self) -> None:
+        central = self.centralWidget()
+        if central is not None:
+            central.adjustSize()
+        self.adjustSize()
 
     @staticmethod
     def _format_eta(remaining_seconds: float | None) -> str:

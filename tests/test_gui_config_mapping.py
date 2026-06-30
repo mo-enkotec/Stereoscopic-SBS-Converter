@@ -26,10 +26,25 @@ def test_build_simple_config_uses_preset_mapping() -> None:
         input_path=Path("/tmp/in.mp4"),
         output_path=Path("/tmp/out.mp4"),
         preset_key="quality-safe",
+        upscale_4k=False,
     )
     assert config.profile == SIMPLE_PRESETS["quality-safe"]["profile"]
     assert config.perf_mode == SIMPLE_PRESETS["quality-safe"]["perf_mode"]
     assert config.compat_profile == "strict"
+    assert config.upscale is False
+    assert config.target_height is None
+
+
+def test_build_simple_config_enables_fixed_4k_upscale_when_requested() -> None:
+    config = build_simple_config(
+        input_path=Path("/tmp/in.mp4"),
+        output_path=Path("/tmp/out.mp4"),
+        preset_key="quality-safe",
+        upscale_4k=True,
+    )
+
+    assert config.upscale is True
+    assert config.target_height == 2160
 
 
 def test_build_advanced_config_honors_option_overrides() -> None:
@@ -73,6 +88,8 @@ def test_simple_panel_state_does_not_include_frame_preview_flag() -> None:
     state = panel.get_state()
 
     assert "frame_preview_enabled" not in state
+    assert "upscale_4k" in state
+    assert state["upscale_4k"] is False
 
 
 def test_advanced_panel_state_does_not_include_frame_preview_flag() -> None:
