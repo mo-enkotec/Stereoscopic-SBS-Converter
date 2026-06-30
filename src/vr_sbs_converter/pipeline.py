@@ -230,7 +230,6 @@ def run_conversion(
         pending_error: Exception | None = None
         conversion_canceled = False
         eta_started: float | None = None
-        conversion_started = perf_counter()
         function_timing = FunctionTimingCollector()
         live_top5_report_interval_seconds = 2.0
         next_live_top5_report_seconds = live_top5_report_interval_seconds
@@ -437,23 +436,9 @@ def run_conversion(
                 _emit_preview(sbs_frame_payload)
 
             def _on_parallel_progress(payload: dict[str, Any]) -> None:
-                if callbacks is None or callbacks.on_progress is None:
-                    return
                 current_written = int(payload.get("frame_index", 0))
                 absolute_frame = resume_start_frame + current_written
-                percent = (
-                    (absolute_frame / metadata.total_frames) * 100.0
-                    if metadata.total_frames > 0
-                    else 0.0
-                )
-                callbacks.on_progress(
-                    {
-                        "frame_index": absolute_frame,
-                        "total_frames": metadata.total_frames,
-                        "percent": percent,
-                        "stage": str(payload.get("stage", "converting")),
-                    }
-                )
+                _emit_progress(absolute_frame, stage=str(payload.get("stage", "converting")))
 
             parallel_callbacks = None
             if callbacks is not None:
@@ -479,6 +464,7 @@ def run_conversion(
         try:
             if resume_start_frame > 0:
                 _skip_frames_to_resume(resume_start_frame)
+            eta_started = perf_counter()
             if use_parallel:
                 _run_parallel_frames()
             else:

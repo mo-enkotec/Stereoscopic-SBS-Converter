@@ -587,7 +587,11 @@ def test_run_conversion_live_top5_does_not_burst_when_callbacks_are_sparse(monke
     monkeypatch.setattr("vr_sbs_converter.pipeline.run_parallel_conversion_configured", _fake_parallel, raising=False)
 
     status_events: list[str] = []
-    callbacks = ConversionCallbacks(on_status=lambda message: status_events.append(message))
+    progress_events: list[dict] = []
+    callbacks = ConversionCallbacks(
+        on_status=lambda message: status_events.append(message),
+        on_progress=lambda payload: progress_events.append(payload),
+    )
     config = ConversionConfig(
         input_path=input_video,
         output_path=output_video,
@@ -598,6 +602,7 @@ def test_run_conversion_live_top5_does_not_burst_when_callbacks_are_sparse(monke
     run_conversion(config, callbacks=callbacks)
 
     live_top5_events = [message for message in status_events if "Function timing top-5:" in message]
+    assert progress_events
     assert len(live_top5_events) == 1
 
 
