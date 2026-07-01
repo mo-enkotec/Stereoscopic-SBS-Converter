@@ -1,7 +1,19 @@
 import cv2
+import inspect
 import numpy as np
 
 from vr_sbs_converter.depth import condition_depth_for_stereo
+
+
+def _import_torch_or_skip():
+    try:
+        import torch
+
+        return torch
+    except Exception:
+        import pytest
+
+        pytest.skip("torch unavailable")
 
 
 def test_edge_aware_depth_filter_preserves_hard_boundary() -> None:
@@ -109,3 +121,87 @@ def test_midas_torch_preprocess_supports_fp16_output() -> None:
 
     assert out.dtype == torch.float16
 
+
+def test_condition_depth_torch_matches_numpy_within_tolerance() -> None:
+    from vr_sbs_converter.depth import _condition_depth_for_stereo_torch
+
+    torch = _import_torch_or_skip()
+    height, width = 16, 24
+    depth = np.linspace(0.0, 1.0, height * width, dtype=np.float32).reshape(height, width)
+    frame_bgr = np.zeros((height, width, 3), dtype=np.uint8)
+    frame_bgr[:, : width // 2] = (20, 40, 60)
+    frame_bgr[:, width // 2 :] = (220, 200, 180)
+
+    expected = condition_depth_for_stereo(depth, frame_bgr, edge_protect_strength=0.75)
+    actual = _condition_depth_for_stereo_torch(
+        torch.from_numpy(depth),
+        torch.from_numpy(frame_bgr),
+        0.75,
+        torch=torch,
+    )
+
+    difference = torch.abs(actual - torch.from_numpy(expected))
+    assert float(difference.mean().item()) <= 0.05
+    assert float(difference.max().item()) <= 0.20
+
+
+def test_condition_depth_torch_returns_normalized_range() -> None:
+    from vr_sbs_converter.depth import _condition_depth_for_stereo_torch
+
+    torch = _import_torch_or_skip()
+    depth = torch.linspace(5.0, 9.0, 120, dtype=torch.float32).reshape(10, 12)
+    frame_bgr = torch.full((10, 12, 3), 127, dtype=torch.uint8)
+
+    conditioned = _condition_depth_for_stereo_torch(
+        depth,
+        frame_bgr,
+        0.75,
+        torch=torch,
+    )
+
+    assert float(conditioned.min().item()) >= 0.0
+    assert float(conditioned.max().item()) <= 1.0
+
+
+def test_condition_depth_torch_skips_edge_protect_when_strength_zero() -> None:
+    from vr_sbs_converter.depth import _condition_depth_for_stereo_torch
+
+    torch = _import_torch_or_skip()
+    depth = torch.tensor([[2.0, 4.0], [6.0, 10.0]], dtype=torch.float32)
+    frame_bgr = torch.zeros((2, 2, 3), dtype=torch.uint8)
+
+    conditioned = _condition_depth_for_stereo_torch(
+        depth,
+        frame_bgr,
+        0.0,
+        torch=torch,
+    )
+
+    expected = (depth - depth.min()) / (depth.max() - depth.min())
+    assert torch.allclose(conditioned, expected, atol=1e-5)
+
+
+def test_condition_depth_torch_handles_zero_spread() -> None:
+    from vr_sbs_converter.depth import _condition_depth_for_stereo_torch
+
+    torch = _import_torch_or_skip()
+    depth = torch.full((6, 8), 3.0, dtype=torch.float32)
+    frame_bgr = torch.full((6, 8, 3), 64, dtype=torch.uint8)
+
+    conditioned = _condition_depth_for_stereo_torch(
+        depth,
+        frame_bgr,
+        0.75,
+        torch=torch,
+    )
+
+    assert torch.isfinite(conditioned).all()
+    assert torch.count_nonzero(conditioned).item() == 0
+
+
+def test_condition_depth_torch_avoids_cuda_scalar_synchronization() -> None:
+    import vr_sbs_converter.depth as depth_module
+
+    source = inspect.getsource(depth_module)
+
+    assert "bool(" not in source

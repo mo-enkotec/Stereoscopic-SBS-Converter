@@ -65,6 +65,136 @@ def condition_depth_for_stereo(
     return normalize_depth_map(conditioned)
 
 
+_DEPTH_CONDITIONING_KERNEL_CACHE = {}
+
+
+def _normalize_depth_tensor(depth_tensor, *, torch):
+    depth_tensor = depth_tensor.to(dtype=torch.float32)
+    min_value = depth_tensor.amin()
+    max_value = depth_tensor.amax()
+    spread = max_value - min_value
+    normalized = (depth_tensor - min_value) / spread.clamp_min(1e-8)
+    return torch.where(spread <= 1e-8, torch.zeros_like(normalized), normalized).to(
+        dtype=torch.float32
+    )
+
+
+def _conditioning_kernel_cache_key(device) -> tuple[str, int | None]:
+    return (str(device.type), getattr(device, "index", None))
+
+
+def _get_depth_conditioning_kernels(*, torch, device, kernel_cache=None):
+    cache = kernel_cache if kernel_cache is not None else _DEPTH_CONDITIONING_KERNEL_CACHE
+    key = _conditioning_kernel_cache_key(device)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    offsets = torch.arange(-3, 4, device=device, dtype=torch.float32)
+    gaussian = torch.exp(-(offsets * offsets) / (2.0 * 1.2 * 1.2))
+    gaussian = gaussian / gaussian.sum()
+    kernels = {
+        "gaussian_x": gaussian.view(1, 1, 1, 7),
+        "gaussian_y": gaussian.view(1, 1, 7, 1),
+        "sobel_x": torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+            device=device,
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3),
+        "sobel_y": torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+            device=device,
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3),
+    }
+    cache[key] = kernels
+    return kernels
+
+
+def _pad_for_kernel(tensor, padding: tuple[int, int, int, int], *, torch):
+    _, _, height, width = tensor.shape
+    left, right, top, bottom = padding
+    can_reflect = height > max(top, bottom) and width > max(left, right)
+    mode = "reflect" if can_reflect else "replicate"
+    return torch.nn.functional.pad(tensor, padding, mode=mode)
+
+
+def _condition_depth_for_stereo_torch_impl(
+    depth_tensor,
+    frame_bgr_tensor,
+    edge_protect_strength,
+    *,
+    torch,
+    kernel_cache=None,
+):
+    """Torch/GPU equivalent of condition_depth_for_stereo.
+
+    depth_tensor: float32 tensor [H, W] on any device.
+    frame_bgr_tensor: uint8 or float tensor [H, W, 3] on the same device (BGR).
+    Returns a torch tensor [H, W] float32 on the same device.
+    """
+    normalized = _normalize_depth_tensor(depth_tensor, torch=torch)
+    if edge_protect_strength <= 0:
+        return normalized
+
+    kernels = _get_depth_conditioning_kernels(
+        torch=torch,
+        device=normalized.device,
+        kernel_cache=kernel_cache,
+    )
+    image = normalized.view(1, 1, *normalized.shape)
+    smoothed = torch.nn.functional.conv2d(
+        _pad_for_kernel(image, (3, 3, 0, 0), torch=torch),
+        kernels["gaussian_x"],
+    )
+    smoothed = torch.nn.functional.conv2d(
+        _pad_for_kernel(smoothed, (0, 0, 3, 3), torch=torch),
+        kernels["gaussian_y"],
+    ).squeeze(0).squeeze(0)
+
+    frame = frame_bgr_tensor.to(device=normalized.device, dtype=torch.float32) / 255.0
+    gray = (
+        (frame[..., 0] * 0.114)
+        + (frame[..., 1] * 0.587)
+        + (frame[..., 2] * 0.299)
+    )
+    gray_image = gray.view(1, 1, *gray.shape)
+    padded_gray = _pad_for_kernel(gray_image, (1, 1, 1, 1), torch=torch)
+    grad_x = torch.nn.functional.conv2d(padded_gray, kernels["sobel_x"]).squeeze(0).squeeze(0)
+    grad_y = torch.nn.functional.conv2d(padded_gray, kernels["sobel_y"]).squeeze(0).squeeze(0)
+    magnitude = torch.sqrt((grad_x * grad_x) + (grad_y * grad_y))
+    max_magnitude = magnitude.amax()
+    edge_mask = torch.clamp(magnitude / max_magnitude.clamp_min(1e-8), 0.0, 1.0)
+    edge_mask = torch.where(max_magnitude <= 1e-8, torch.zeros_like(edge_mask), edge_mask).to(
+        dtype=torch.float32
+    )
+
+    edge_weight = torch.clamp(edge_mask * float(edge_protect_strength), 0.0, 1.0)
+    conditioned = (edge_weight * normalized) + ((1.0 - edge_weight) * smoothed)
+    return _normalize_depth_tensor(conditioned, torch=torch)
+
+
+def _condition_depth_for_stereo_torch(
+    depth_tensor,
+    frame_bgr_tensor,
+    edge_protect_strength,
+    *,
+    torch,
+):
+    """Torch/GPU equivalent of condition_depth_for_stereo.
+
+    depth_tensor: float32 tensor [H, W] on any device.
+    frame_bgr_tensor: uint8 or float tensor [H, W, 3] on the same device (BGR).
+    Returns a torch tensor [H, W] float32 on the same device.
+    """
+    return _condition_depth_for_stereo_torch_impl(
+        depth_tensor,
+        frame_bgr_tensor,
+        edge_protect_strength,
+        torch=torch,
+    )
+
+
 class LumaDepthEstimator(DepthEstimator):
     def __init__(self, smoothing_alpha: float = 0.65, edge_protect_strength: float = 0.75) -> None:
         self._smoother = TemporalDepthSmoother(alpha=smoothing_alpha)
@@ -138,6 +268,7 @@ class MidasDepthEstimator(DepthEstimator):
         self._preproc_mean = None
         self._preproc_std = None
         self._preproc_size: tuple[int, int] | None = None
+        self._depth_conditioning_kernel_cache = {}
 
     def _resolve_device(self) -> str:
         if self._device == "cpu":
@@ -210,21 +341,32 @@ class MidasDepthEstimator(DepthEstimator):
             dtype=model_dtype,
         )
 
-        with self._torch.no_grad():
-            with self._torch.cuda.amp.autocast(enabled=use_autocast):
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=use_autocast):
                 predicted = self._model(pixel_values=pixel_values).predicted_depth
-                resized = self._torch.nn.functional.interpolate(
+                resized = torch.nn.functional.interpolate(
                     predicted.unsqueeze(1),
                     size=rgb.shape[:2],
                     mode="bicubic",
                     align_corners=False,
-                ).squeeze()
-        depth = resized.detach().cpu().numpy()
-        conditioned = condition_depth_for_stereo(
-            depth.astype(np.float32),
-            frame_bgr,
-            edge_protect_strength=self._edge_protect_strength,
-        )
+                ).squeeze(0).squeeze(0)
+            if torch_device == "cuda":
+                frame_bgr_tensor = torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=torch_device)
+                conditioned_tensor = _condition_depth_for_stereo_torch_impl(
+                    resized,
+                    frame_bgr_tensor,
+                    self._edge_protect_strength,
+                    torch=torch,
+                    kernel_cache=self._depth_conditioning_kernel_cache,
+                )
+                conditioned = conditioned_tensor.detach().cpu().numpy()
+            else:
+                depth = resized.detach().cpu().numpy()
+                conditioned = condition_depth_for_stereo(
+                    depth.astype(np.float32),
+                    frame_bgr,
+                    edge_protect_strength=self._edge_protect_strength,
+                )
         return self._smoother.apply(conditioned)
 
 
