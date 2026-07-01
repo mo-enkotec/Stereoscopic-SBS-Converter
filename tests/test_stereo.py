@@ -82,3 +82,44 @@ def test_forward_warp_prefers_higher_depth_on_collision() -> None:
 
     warped = stereo_module._forward_warp_eye(frame, depth, shifted_x)
     assert int(warped[0, 0, 2]) > int(warped[0, 0, 1])
+
+
+def test_compose_sbs_accepts_torch_tensors_full_mode() -> None:
+    import pytest
+
+    torch = None
+    try:
+        import torch as _torch
+        torch = _torch
+    except Exception:
+        pytest.skip("torch unavailable")
+
+    left = torch.zeros((6, 8, 3), dtype=torch.uint8)
+    right = torch.ones((6, 8, 3), dtype=torch.uint8)
+
+    composed = compose_sbs(left, right, "full")
+
+    assert isinstance(composed, torch.Tensor)
+    assert tuple(composed.shape) == (6, 16, 3)
+    assert int(composed[0, 0, 0].item()) == 0
+    assert int(composed[0, 8, 0].item()) == 1
+
+
+def test_compose_sbs_accepts_torch_tensors_half_mode() -> None:
+    import pytest
+
+    torch = None
+    try:
+        import torch as _torch
+        torch = _torch
+    except Exception:
+        pytest.skip("torch unavailable")
+
+    left = torch.zeros((6, 8, 3), dtype=torch.uint8)
+    right = torch.ones((6, 8, 3), dtype=torch.uint8)
+
+    composed = compose_sbs(left, right, "half")
+
+    assert isinstance(composed, torch.Tensor)
+    assert tuple(composed.shape) == (6, 8, 3)
+

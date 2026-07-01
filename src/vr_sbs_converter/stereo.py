@@ -125,10 +125,12 @@ def synthesize_stereo_views(
 
 
 def compose_sbs(
-    left_eye: np.ndarray,
-    right_eye: np.ndarray,
+    left_eye,
+    right_eye,
     mode: str,
-) -> np.ndarray:
+):
+    if _is_torch_tensor(left_eye):
+        return _compose_sbs_torch(left_eye, right_eye, mode)
     if mode == "full":
         return np.concatenate((left_eye, right_eye), axis=1)
     if mode == "half":
@@ -138,4 +140,38 @@ def compose_sbs(
             right_eye, (half_width, right_eye.shape[0]), interpolation=cv2.INTER_AREA
         )
         return np.concatenate((left_half, right_half), axis=1)
+    raise ValueError(f"Unsupported SBS mode: {mode}")
+
+
+def _is_torch_tensor(obj) -> bool:
+    # Detect torch tensors without importing torch at module load time.
+    module = type(obj).__module__
+    if not module.startswith("torch"):
+        return False
+    cls = type(obj).__name__
+    return cls == "Tensor"
+
+
+def _compose_sbs_torch(left_eye, right_eye, mode: str):
+    import torch
+
+    if mode == "full":
+        return torch.cat((left_eye, right_eye), dim=1)
+    if mode == "half":
+        half_width = max(2, left_eye.shape[1] // 2)
+        # torch.nn.functional.interpolate expects (N, C, H, W); frames are (H, W, C).
+        def _resize_area(tensor):
+            hwc = tensor
+            if hwc.dtype != torch.float32:
+                hwc = hwc.to(dtype=torch.float32)
+            nchw = hwc.permute(2, 0, 1).unsqueeze(0)
+            resized = torch.nn.functional.interpolate(
+                nchw, size=(int(hwc.shape[0]), int(half_width)), mode="area"
+            )
+            out = resized.squeeze(0).permute(1, 2, 0)
+            if left_eye.dtype != torch.float32:
+                out = out.clamp(0, 255).to(dtype=left_eye.dtype)
+            return out
+
+        return torch.cat((_resize_area(left_eye), _resize_area(right_eye)), dim=1)
     raise ValueError(f"Unsupported SBS mode: {mode}")

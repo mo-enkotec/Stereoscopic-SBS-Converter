@@ -30,7 +30,7 @@ from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
 from .perf_stats import FunctionTimingCollector, format_function_timing_top
 from .pipeline_parallel import run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
-from .stereo_torch import select_stereo_synthesis_backend
+from .stereo_torch import select_stereo_synthesis_backend, tensor_frame_to_numpy
 from .upscaling import compute_target_dimensions, create_default_upscaler
 from .video_io import (
     VideoIOError,
@@ -393,7 +393,7 @@ def run_conversion(
                     depth_time += depth_elapsed
                 return depth_payload
 
-            def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[Any, Any]:
                 nonlocal stereo_time
                 if upscaler is not None:
                     upscale_started = perf_counter()
@@ -412,7 +412,7 @@ def run_conversion(
                     stereo_time += stereo_elapsed
                 return stereo_payload
 
-            def _compose_sbs(stereo_payload: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+            def _compose_sbs(stereo_payload: tuple[Any, Any]) -> Any:
                 nonlocal stereo_time
                 compose_started = perf_counter()
                 left_eye, right_eye = stereo_payload
@@ -423,10 +423,11 @@ def run_conversion(
                     stereo_time += compose_elapsed
                 return sbs_frame_payload
 
-            def _write_frame(_frame_index: int, sbs_frame_payload: np.ndarray) -> None:
+            def _write_frame(_frame_index: int, sbs_frame_payload) -> None:
                 nonlocal encode_time, frames_processed, frames_processed_this_run
                 encode_started = perf_counter()
-                write_raw_frame(writer, sbs_frame_payload)
+                sbs_frame_numpy = tensor_frame_to_numpy(sbs_frame_payload)
+                write_raw_frame(writer, sbs_frame_numpy)
                 encode_elapsed = perf_counter() - encode_started
                 function_timing.record("write_raw_frame", encode_elapsed * 1000.0)
                 with timing_lock:
@@ -434,7 +435,7 @@ def run_conversion(
                 frames_processed += 1
                 frames_processed_this_run += 1
                 progress.update(1)
-                _emit_preview(sbs_frame_payload)
+                _emit_preview(sbs_frame_numpy)
 
             def _on_parallel_progress(payload: dict[str, Any]) -> None:
                 current_written = int(payload.get("frame_index", 0))

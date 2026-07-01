@@ -40,12 +40,31 @@ def is_torch_cuda_stereo_available(*, torch_module=None) -> bool:
         return False
 
 
-def _convert_back_to_numpy_dtype(tensor, dtype: np.dtype) -> np.ndarray:
-    array = tensor.detach().cpu().numpy()
+def _clamp_to_numpy_dtype(tensor, dtype: np.dtype):
+    torch = importlib.import_module("torch")
     if np.issubdtype(dtype, np.integer):
         info = np.iinfo(dtype)
-        return np.clip(np.rint(array), info.min, info.max).astype(dtype)
+        tensor = tensor.round().clamp(info.min, info.max)
+        torch_dtype = getattr(torch, dtype.name, None)
+        if torch_dtype is not None:
+            tensor = tensor.to(dtype=torch_dtype)
+    return tensor
+
+
+def _convert_back_to_numpy_dtype(tensor, dtype: np.dtype) -> np.ndarray:
+    tensor = _clamp_to_numpy_dtype(tensor, dtype)
+    array = tensor.detach().cpu().numpy()
     return array.astype(dtype, copy=False)
+
+
+def tensor_frame_to_numpy(payload, dtype: np.dtype = np.dtype(np.uint8)) -> np.ndarray:
+    """Convert a GPU-resident frame tensor to a contiguous numpy array."""
+    if isinstance(payload, np.ndarray):
+        return payload
+    torch = _import_torch()
+    if torch is None or not isinstance(payload, torch.Tensor):
+        return np.asarray(payload)
+    return _convert_back_to_numpy_dtype(payload, dtype)
 
 
 def _linear_horizontal_sample(frame, x_map):
@@ -123,7 +142,14 @@ def synthesize_stereo_views_torch(
     depth: np.ndarray,
     stereo_strength: float,
     max_disparity_px: int | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+):
+    """Warp left/right eyes on the CUDA device.
+
+    Returns a tuple of torch tensors that remain on the GPU so downstream
+    composition (``compose_sbs``) can operate without an intermediate CPU
+    roundtrip. Callers must convert to numpy via ``tensor_frame_to_numpy``
+    before encoding.
+    """
     torch = _import_torch()
     if torch is None or not is_torch_cuda_stereo_available(torch_module=torch):
         raise RuntimeError("Torch CUDA stereo backend is unavailable.")
@@ -144,9 +170,9 @@ def synthesize_stereo_views_torch(
     left_eye = _forward_warp_eye_torch(frame_tensor, depth_tensor, left_shifted_x, torch=torch)
     right_eye = _forward_warp_eye_torch(frame_tensor, depth_tensor, right_shifted_x, torch=torch)
 
-    left_np = _convert_back_to_numpy_dtype(left_eye, frame_bgr.dtype)
-    right_np = _convert_back_to_numpy_dtype(right_eye, frame_bgr.dtype)
-    return left_np, right_np
+    left_eye = _clamp_to_numpy_dtype(left_eye, frame_bgr.dtype)
+    right_eye = _clamp_to_numpy_dtype(right_eye, frame_bgr.dtype)
+    return left_eye, right_eye
 
 
 def select_stereo_synthesis_backend(

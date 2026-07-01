@@ -96,15 +96,18 @@ def test_torch_cuda_backend_executes_or_skips_cleanly() -> None:
     if not is_torch_cuda_stereo_available():
         pytest.skip("torch+cuda stereo backend unavailable")
 
+    torch = _import_torch()
     frame, depth = _sample_inputs()
     backend = select_stereo_synthesis_backend(device_preference="cuda")
 
     assert backend.name == "torch-cuda"
     left_eye, right_eye = backend.synthesize(frame, depth, stereo_strength=0.8, max_disparity_px=8)
-    assert left_eye.shape == frame.shape
-    assert right_eye.shape == frame.shape
-    assert left_eye.dtype == frame.dtype
-    assert right_eye.dtype == frame.dtype
+    assert isinstance(left_eye, torch.Tensor)
+    assert isinstance(right_eye, torch.Tensor)
+    assert left_eye.device.type == "cuda"
+    assert right_eye.device.type == "cuda"
+    assert tuple(left_eye.shape) == frame.shape
+    assert tuple(right_eye.shape) == frame.shape
 
 
 def test_forward_warp_collision_is_deterministic_with_depth_and_tiebreak() -> None:
