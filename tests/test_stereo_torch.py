@@ -251,3 +251,31 @@ def test_backward_warp_zero_disparity_is_identity() -> None:
     assert torch.allclose(left_eye, frame, atol=1e-4)
     assert torch.allclose(right_eye, frame, atol=1e-4)
 
+
+def test_backward_warp_fp16_matches_fp32_within_tolerance() -> None:
+    torch = _import_torch()
+    if torch is None:
+        pytest.skip("torch unavailable")
+
+    from vr_sbs_converter.stereo_torch import _backward_warp_eye_torch
+
+    height, width = 12, 32
+    torch.manual_seed(0)
+    frame = (torch.rand((height, width, 3), dtype=torch.float32) * 200.0)
+    disparity = torch.rand((height, width), dtype=torch.float32) * 4.0
+
+    ref = _backward_warp_eye_torch(frame, disparity, direction=-1.0, torch=torch, dtype=torch.float32)
+    approx = _backward_warp_eye_torch(
+        frame.to(dtype=torch.float16),
+        disparity.to(dtype=torch.float16),
+        direction=-1.0,
+        torch=torch,
+        dtype=torch.float16,
+    ).to(dtype=torch.float32)
+
+    diff = (ref - approx).abs()
+    # Cast + interpolation in fp16 should be near-identical for values <255.
+    assert float(diff.mean().item()) < 0.6
+    assert float(diff.max().item()) < 4.0
+
+

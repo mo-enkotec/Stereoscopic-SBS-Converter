@@ -85,12 +85,17 @@ def _has_scatter_reduce_support(torch) -> bool:
     return bool(tensor_type is not None and hasattr(tensor_type, "scatter_reduce_"))
 
 
-def _backward_warp_eye_torch(frame, disparity, direction: float, *, torch):
+def _backward_warp_eye_torch(frame, disparity, direction: float, *, torch, dtype=None):
     """Backward warp one eye using a single grid_sample call.
 
     ``frame`` is expected as ``[H, W, C]`` float tensor on the same device as
     ``disparity``. ``disparity`` is a ``[H, W]`` non-negative shift in pixels.
     ``direction`` is ``-1.0`` for the left eye and ``+1.0`` for the right eye.
+
+    Optional ``dtype`` controls the intermediate precision (``torch.float16``
+    on CUDA halves memory bandwidth and can significantly reduce warp time
+    on modern GPUs). Defaults to the input frame dtype when it is a floating
+    type, else ``torch.float32``.
 
     This approximates the forward warp (``target = source ± disparity/2``) by
     sampling ``source_x = dest_x ∓ disparity(dest_x)/2`` — the standard
@@ -99,7 +104,8 @@ def _backward_warp_eye_torch(frame, disparity, direction: float, *, torch):
     """
     height, width = frame.shape[:2]
     device = frame.device
-    dtype = torch.float32
+    if dtype is None:
+        dtype = frame.dtype if frame.dtype.is_floating_point else torch.float32
 
     y = torch.arange(height, device=device, dtype=dtype).view(height, 1).expand(height, width)
     x = torch.arange(width, device=device, dtype=dtype).view(1, width).expand(height, width)
@@ -197,11 +203,16 @@ def synthesize_stereo_views_torch(
     disparity = _disparity_map(prepared_depth, width, stereo_strength, max_disparity_px)
 
     device = torch.device("cuda")
-    frame_tensor = torch.from_numpy(frame_bgr).to(device=device, dtype=torch.float32)
-    disparity_tensor = torch.from_numpy(disparity).to(device=device, dtype=torch.float32)
+    warp_dtype = torch.float16
+    frame_tensor = torch.from_numpy(frame_bgr).to(device=device, dtype=warp_dtype)
+    disparity_tensor = torch.from_numpy(disparity).to(device=device, dtype=warp_dtype)
 
-    left_eye = _backward_warp_eye_torch(frame_tensor, disparity_tensor, direction=-1.0, torch=torch)
-    right_eye = _backward_warp_eye_torch(frame_tensor, disparity_tensor, direction=+1.0, torch=torch)
+    left_eye = _backward_warp_eye_torch(
+        frame_tensor, disparity_tensor, direction=-1.0, torch=torch, dtype=warp_dtype
+    )
+    right_eye = _backward_warp_eye_torch(
+        frame_tensor, disparity_tensor, direction=+1.0, torch=torch, dtype=warp_dtype
+    )
 
     left_eye = _clamp_to_numpy_dtype(left_eye, frame_bgr.dtype)
     right_eye = _clamp_to_numpy_dtype(right_eye, frame_bgr.dtype)
