@@ -264,16 +264,20 @@ class MidasDepthEstimator(DepthEstimator):
         edge_protect_strength: float = 0.75,
         depth_process_scale: float = 1.0,
         use_fp16: bool = False,
+        depth_compile: bool = False,
     ) -> None:
         self._device = device
         self._model_name = model_name
         self._model = None
+        self._uncompiled_model = None
         self._processor = None
         self._torch = None
         self._smoother = TemporalDepthSmoother(alpha=0.7)
         self._edge_protect_strength = edge_protect_strength
         self._depth_process_scale = depth_process_scale
         self._use_fp16 = use_fp16
+        self._depth_compile = depth_compile
+        self._compiled = False
         self._preproc_mean = None
         self._preproc_std = None
         self._preproc_size: tuple[int, int] | None = None
@@ -329,6 +333,41 @@ class MidasDepthEstimator(DepthEstimator):
             self._model.half()
             torch.backends.cudnn.benchmark = True
         self._model.eval()
+        if self._depth_compile and torch_device == "cuda" and hasattr(torch, "compile"):
+            uncompiled_model = self._model
+            try:
+                self._model = torch.compile(
+                    uncompiled_model,
+                    mode="reduce-overhead",
+                    fullgraph=False,
+                    dynamic=False,
+                )
+                self._uncompiled_model = uncompiled_model
+                self._compiled = True
+            except Exception as exc:
+                warnings.warn(
+                    f"torch.compile failed for MiDaS ({exc}); using uncompiled MiDaS fallback.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                self._compiled = False
+
+    def _predict_depth(self, pixel_values):
+        assert self._model is not None
+        try:
+            return self._model(pixel_values=pixel_values).predicted_depth
+        except Exception as exc:
+            if not self._compiled or self._uncompiled_model is None:
+                raise
+            warnings.warn(
+                f"Compiled MiDaS forward failed ({exc}); retrying with uncompiled MiDaS fallback.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._model = self._uncompiled_model
+            self._uncompiled_model = None
+            self._compiled = False
+            return self._model(pixel_values=pixel_values).predicted_depth
 
     def estimate(self, frame_bgr: np.ndarray) -> np.ndarray:
         self._load()
@@ -367,7 +406,7 @@ class MidasDepthEstimator(DepthEstimator):
 
         with torch.no_grad():
             with torch.cuda.amp.autocast(enabled=use_autocast):
-                predicted = self._model(pixel_values=pixel_values).predicted_depth
+                predicted = self._predict_depth(pixel_values)
                 resized = torch.nn.functional.interpolate(
                     predicted.unsqueeze(1),
                     size=rgb.shape[:2],
@@ -421,6 +460,7 @@ def create_depth_estimator(
     edge_protect_strength: float = 0.75,
     depth_process_scale: float = 1.0,
     use_fp16: bool = False,
+    depth_compile: bool = False,
 ) -> DepthEstimator:
     if backend == "luma":
         return LumaDepthEstimator(edge_protect_strength=edge_protect_strength)
@@ -431,6 +471,7 @@ def create_depth_estimator(
             edge_protect_strength=edge_protect_strength,
             depth_process_scale=depth_process_scale,
             use_fp16=use_fp16,
+            depth_compile=depth_compile,
         )
 
     if backend == "auto":
@@ -440,6 +481,7 @@ def create_depth_estimator(
                 edge_protect_strength=edge_protect_strength,
                 depth_process_scale=depth_process_scale,
                 use_fp16=use_fp16,
+                depth_compile=depth_compile,
             ),
             fallback=LumaDepthEstimator(edge_protect_strength=edge_protect_strength),
         )

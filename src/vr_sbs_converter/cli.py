@@ -86,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scale factor for depth inference resolution (0-1]. Lower is faster.",
     )
     parser.add_argument(
+        "--depth-compile",
+        action="store_true",
+        help="Opt-in torch.compile of the MiDaS depth model (adds 30-90s startup; only meaningful on CUDA).",
+    )
+    parser.add_argument(
         "--edge-protect-strength",
         type=float,
         help="Edge protection intensity for depth/stereo processing (0-1).",
@@ -155,6 +160,7 @@ def build_config(args: argparse.Namespace) -> ConversionConfig:
         audio_fallback=args.audio_fallback,
         max_disparity_px=args.max_disparity_px,
         depth_process_scale=args.depth_process_scale,
+        depth_compile=args.depth_compile,
         edge_protect_strength=args.edge_protect_strength,
         stereo_strength=args.stereo_strength,
         overwrite=args.overwrite,

@@ -43,6 +43,7 @@ class ConversionConfig:
     audio_fallback: AudioFallbackMode = "copy-aac"
     max_disparity_px: int | None = None
     depth_process_scale: float | None = None
+    depth_compile: bool = False
     edge_protect_strength: float | None = None
     stereo_strength: float = 0.8
     overwrite: bool = False

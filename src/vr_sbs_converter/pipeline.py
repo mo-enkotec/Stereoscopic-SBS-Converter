@@ -175,6 +175,7 @@ def run_conversion(
         edge_protect_strength=config.edge_protect_strength or 0.75,
         depth_process_scale=runtime_plan.depth_process_scale,
         use_fp16=runtime_plan.use_fp16,
+        depth_compile=config.depth_compile,
     )
 
     with _working_directory(config) as work_dir:
@@ -627,6 +628,7 @@ def dry_run_example_frame(
         edge_protect_strength=config.edge_protect_strength or 0.75,
         depth_process_scale=runtime_plan.depth_process_scale,
         use_fp16=runtime_plan.use_fp16,
+        depth_compile=config.depth_compile,
     )
     depth = depth_estimator.estimate(frame_bgr)
     left_eye, right_eye = synthesize_stereo_views(

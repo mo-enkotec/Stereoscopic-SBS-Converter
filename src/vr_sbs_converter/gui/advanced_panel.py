@@ -58,6 +58,8 @@ class AdvancedPanel(QWidget):
         self.depth_process_scale.setSingleStep(0.05)
         self.depth_process_scale.setValue(1.0)
 
+        self.depth_compile = QCheckBox("Compile depth model (torch.compile — experimental)")
+
         self.edge_protect_strength = QDoubleSpinBox()
         self.edge_protect_strength.setRange(0.0, 1.0)
         self.edge_protect_strength.setSingleStep(0.05)
@@ -88,6 +90,7 @@ class AdvancedPanel(QWidget):
         layout.addRow("Depth backend", self.depth_backend)
         layout.addRow("Max disparity px", self.max_disparity_px)
         layout.addRow("Depth scale", self.depth_process_scale)
+        layout.addRow("", self.depth_compile)
         layout.addRow("Edge protect strength", self.edge_protect_strength)
         layout.addRow("Stereo strength", self.stereo_strength)
         layout.addRow("", self.overwrite)
@@ -112,6 +115,7 @@ class AdvancedPanel(QWidget):
             "depth_backend": self.depth_backend.currentText(),
             "max_disparity_px": self.max_disparity_px.value(),
             "depth_process_scale": self.depth_process_scale.value(),
+            "depth_compile": self.depth_compile.isChecked(),
             "edge_protect_strength": self.edge_protect_strength.value(),
             "stereo_strength": self.stereo_strength.value(),
             "overwrite": self.overwrite.isChecked(),

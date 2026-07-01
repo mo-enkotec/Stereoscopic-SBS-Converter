@@ -58,6 +58,7 @@ def test_build_advanced_config_honors_option_overrides() -> None:
             "profile": "balanced",
             "perf_mode": "gpu-balanced",
             "depth_backend": "luma",
+            "depth_compile": True,
             "device": "cuda",
             "encoder": "h264_nvenc",
             "compat_profile": "strict",
@@ -72,6 +73,7 @@ def test_build_advanced_config_honors_option_overrides() -> None:
     assert config.perf_mode == "gpu-balanced"
     assert config.encoder == "h264_nvenc"
     assert config.depth_backend == "luma"
+    assert config.depth_compile is True
     assert config.device == "cuda"
 
 
@@ -102,3 +104,13 @@ def test_advanced_panel_state_does_not_include_parallel_queue_size() -> None:
     state = panel.get_state()
 
     assert "parallel_queue_size" not in state
+
+
+def test_advanced_panel_state_includes_depth_compile_toggle() -> None:
+    _ensure_app()
+    panel = AdvancedPanel()
+
+    panel.depth_compile.setChecked(True)
+
+    state = panel.get_state()
+    assert state["depth_compile"] is True

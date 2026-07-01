@@ -77,6 +77,7 @@ def test_main_window_builds_advanced_config_from_panel_values() -> None:
     panel.perf_mode.setCurrentText("gpu-balanced")
     panel.device.setCurrentText("cuda")
     panel.depth_backend.setCurrentText("luma")
+    panel.depth_compile.setChecked(True)
     panel.encoder.setCurrentText("h264_nvenc")
 
     config = window.build_config_from_ui()
@@ -87,6 +88,7 @@ def test_main_window_builds_advanced_config_from_panel_values() -> None:
     assert config.perf_mode == "gpu-balanced"
     assert config.device == "cuda"
     assert config.depth_backend == "luma"
+    assert config.depth_compile is True
     assert config.encoder == "h264_nvenc"
 
 

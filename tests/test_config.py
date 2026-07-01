@@ -49,3 +49,12 @@ def test_conversion_config_rejects_invalid_compat_profile(tmp_path: Path) -> Non
             compat_profile="broken",  # type: ignore[arg-type]
         )
 
+
+def test_conversion_config_preserves_depth_compile_opt_in(tmp_path: Path) -> None:
+    config = ConversionConfig(
+        input_path=tmp_path / "in.mp4",
+        output_path=tmp_path / "out.mp4",
+        depth_compile=True,
+    )
+
+    assert config.depth_compile is True

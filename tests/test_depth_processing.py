@@ -16,6 +16,63 @@ def _import_torch_or_skip():
         pytest.skip("torch unavailable")
 
 
+def _install_fake_midas_modules(monkeypatch, compile_fn=None, *, has_compile: bool = True):
+    import sys
+    import types
+
+    class FakeTensor:
+        def view(self, *_args):
+            return self
+
+        def to(self, *_args, **_kwargs):
+            return self
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.to_device = None
+            self.eval_called = False
+
+        def to(self, device):
+            self.to_device = device
+            return self
+
+        def half(self):
+            return self
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+    class FakeProcessor:
+        image_mean = [0.5, 0.5, 0.5]
+        image_std = [0.5, 0.5, 0.5]
+        size = {"height": 384, "width": 384}
+
+    model = FakeModel()
+
+    torch_module = types.ModuleType("torch")
+    torch_module.float32 = object()
+    torch_module.tensor = lambda *_args, **_kwargs: FakeTensor()
+    torch_module.cuda = types.SimpleNamespace(is_available=lambda: True)
+    torch_module.backends = types.SimpleNamespace(
+        cudnn=types.SimpleNamespace(benchmark=False)
+    )
+    if has_compile:
+        torch_module.compile = compile_fn or (lambda compiled_model, **_kwargs: compiled_model)
+
+    transformers_module = types.ModuleType("transformers")
+    transformers_module.AutoImageProcessor = types.SimpleNamespace(
+        from_pretrained=lambda _model_name: FakeProcessor()
+    )
+    transformers_module.DPTForDepthEstimation = types.SimpleNamespace(
+        from_pretrained=lambda _model_name: model
+    )
+
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+    monkeypatch.setitem(sys.modules, "transformers", transformers_module)
+    return model
+
+
 def test_edge_aware_depth_filter_preserves_hard_boundary() -> None:
     height, width = 64, 96
     depth = np.full((height, width), 0.2, dtype=np.float32)
@@ -227,6 +284,117 @@ def test_get_pinned_rgb_buffer_creates_separate_buffers_for_different_shapes(mon
         ((10, 20, 3), FakeTorch.uint8, True),
         ((12, 20, 3), FakeTorch.uint8, True),
     ]
+
+
+def test_midas_load_compiles_model_when_enabled_on_cuda(monkeypatch) -> None:
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    compile_calls = []
+    compiled_model = object()
+
+    def fake_compile(model, **kwargs):
+        compile_calls.append((model, kwargs))
+        return compiled_model
+
+    original_model = _install_fake_midas_modules(monkeypatch, fake_compile)
+    estimator = MidasDepthEstimator(device="cuda", depth_compile=True)
+
+    estimator._load()
+
+    assert compile_calls == [
+        (
+            original_model,
+            {"mode": "reduce-overhead", "fullgraph": False, "dynamic": False},
+        )
+    ]
+    assert estimator._model is compiled_model
+    assert estimator._compiled is True
+
+
+def test_midas_load_does_not_compile_model_on_cpu(monkeypatch) -> None:
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    compile_calls = []
+    original_model = _install_fake_midas_modules(
+        monkeypatch,
+        lambda model, **kwargs: compile_calls.append((model, kwargs)) or object(),
+    )
+    estimator = MidasDepthEstimator(device="cpu", depth_compile=True)
+
+    estimator._load()
+
+    assert compile_calls == []
+    assert estimator._model is original_model
+    assert estimator._compiled is False
+
+
+def test_midas_load_warns_and_keeps_original_model_when_compile_fails(monkeypatch) -> None:
+    import pytest
+
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    def failing_compile(_model, **_kwargs):
+        raise RuntimeError("compile unavailable")
+
+    original_model = _install_fake_midas_modules(monkeypatch, failing_compile)
+    estimator = MidasDepthEstimator(device="cuda", depth_compile=True)
+
+    with pytest.warns(RuntimeWarning, match="torch.compile failed.*uncompiled MiDaS"):
+        estimator._load()
+
+    assert estimator._model is original_model
+    assert estimator._compiled is False
+
+
+def test_midas_load_skips_compile_when_torch_compile_unavailable(monkeypatch) -> None:
+    import warnings
+
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    original_model = _install_fake_midas_modules(monkeypatch, has_compile=False)
+    estimator = MidasDepthEstimator(device="cuda", depth_compile=True)
+
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        estimator._load()
+
+    assert emitted == []
+    assert estimator._model is original_model
+    assert estimator._compiled is False
+
+
+def test_midas_predict_warns_restores_and_retries_when_compiled_forward_fails() -> None:
+    import pytest
+
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    class OriginalModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, *, pixel_values):
+            self.calls += 1
+            return type("Output", (), {"predicted_depth": "depth"})()
+
+    class FailingCompiledModel:
+        def __call__(self, *, pixel_values):
+            raise RuntimeError("compiled graph failed")
+
+    original_model = OriginalModel()
+    compiled_model = FailingCompiledModel()
+    estimator = MidasDepthEstimator(device="cuda", depth_compile=True)
+    estimator._model = compiled_model
+    estimator._uncompiled_model = original_model
+    estimator._compiled = True
+
+    with pytest.warns(RuntimeWarning, match="Compiled MiDaS forward failed.*uncompiled MiDaS"):
+        predicted_depth = estimator._predict_depth(pixel_values=object())
+
+    assert predicted_depth == "depth"
+    assert estimator._model is original_model
+    assert estimator._uncompiled_model is None
+    assert estimator._compiled is False
+    assert original_model.calls == 1
 
 
 def test_condition_depth_torch_matches_numpy_within_tolerance() -> None:

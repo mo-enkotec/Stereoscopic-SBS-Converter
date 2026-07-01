@@ -32,6 +32,31 @@ def test_build_config_from_args(tmp_path: Path) -> None:
     assert config.target_height == 2160
 
 
+def test_parser_depth_compile_defaults_false() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["input.mp4"])
+
+    assert args.depth_compile is False
+
+
+def test_parser_depth_compile_flag_sets_true() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["input.mp4", "--depth-compile"])
+
+    assert args.depth_compile is True
+
+
+def test_build_config_forwards_depth_compile(tmp_path: Path) -> None:
+    input_file = tmp_path / "input.mp4"
+    input_file.write_bytes(b"fake")
+    parser = build_parser()
+    args = parser.parse_args([str(input_file), "--depth-compile", "--overwrite"])
+
+    config = build_config(args)
+
+    assert config.depth_compile is True
+
+
 def test_build_config_rejects_existing_output_without_overwrite(tmp_path: Path) -> None:
     input_file = tmp_path / "clip.mp4"
     input_file.write_bytes(b"fake")
