@@ -206,3 +206,48 @@ def test_forward_warp_fails_fast_without_scatter_reduce(monkeypatch: pytest.Monk
 def test_forward_warp_has_no_python_tolist_fallback() -> None:
     source = inspect.getsource(_forward_warp_eye_torch)
     assert ".tolist(" not in source
+
+
+def test_backward_warp_shape_and_shift_direction_on_cpu() -> None:
+    torch = _import_torch()
+    if torch is None:
+        pytest.skip("torch unavailable")
+
+    from vr_sbs_converter.stereo_torch import _backward_warp_eye_torch
+
+    height, width = 8, 24
+    # Uniform gray with a bright vertical bar at x=12
+    frame = torch.zeros((height, width, 3), dtype=torch.float32)
+    frame[:, 12, :] = 200.0
+    # Uniform disparity of 4 px across the image
+    disparity = torch.full((height, width), 4.0, dtype=torch.float32)
+
+    left_eye = _backward_warp_eye_torch(frame, disparity, direction=-1.0, torch=torch)
+    right_eye = _backward_warp_eye_torch(frame, disparity, direction=+1.0, torch=torch)
+
+    assert tuple(left_eye.shape) == (height, width, 3)
+    assert tuple(right_eye.shape) == (height, width, 3)
+
+    # Left eye: source_x = dest_x + disp/2 = dest_x + 2 → bright bar moves to dest_x = 10
+    assert float(left_eye[0, 10, 0].item()) > float(left_eye[0, 12, 0].item())
+    # Right eye: source_x = dest_x - disp/2 = dest_x - 2 → bright bar moves to dest_x = 14
+    assert float(right_eye[0, 14, 0].item()) > float(right_eye[0, 12, 0].item())
+
+
+def test_backward_warp_zero_disparity_is_identity() -> None:
+    torch = _import_torch()
+    if torch is None:
+        pytest.skip("torch unavailable")
+
+    from vr_sbs_converter.stereo_torch import _backward_warp_eye_torch
+
+    height, width = 6, 10
+    frame = torch.arange(height * width * 3, dtype=torch.float32).view(height, width, 3)
+    disparity = torch.zeros((height, width), dtype=torch.float32)
+
+    left_eye = _backward_warp_eye_torch(frame, disparity, direction=-1.0, torch=torch)
+    right_eye = _backward_warp_eye_torch(frame, disparity, direction=+1.0, torch=torch)
+
+    assert torch.allclose(left_eye, frame, atol=1e-4)
+    assert torch.allclose(right_eye, frame, atol=1e-4)
+

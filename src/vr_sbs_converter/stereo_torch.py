@@ -85,6 +85,44 @@ def _has_scatter_reduce_support(torch) -> bool:
     return bool(tensor_type is not None and hasattr(tensor_type, "scatter_reduce_"))
 
 
+def _backward_warp_eye_torch(frame, disparity, direction: float, *, torch):
+    """Backward warp one eye using a single grid_sample call.
+
+    ``frame`` is expected as ``[H, W, C]`` float tensor on the same device as
+    ``disparity``. ``disparity`` is a ``[H, W]`` non-negative shift in pixels.
+    ``direction`` is ``-1.0`` for the left eye and ``+1.0`` for the right eye.
+
+    This approximates the forward warp (``target = source ± disparity/2``) by
+    sampling ``source_x = dest_x ∓ disparity(dest_x)/2`` — the standard
+    trick used for real-time DIBR. Hole-filling is implicit thanks to
+    ``padding_mode='border'``.
+    """
+    height, width = frame.shape[:2]
+    device = frame.device
+    dtype = torch.float32
+
+    y = torch.arange(height, device=device, dtype=dtype).view(height, 1).expand(height, width)
+    x = torch.arange(width, device=device, dtype=dtype).view(1, width).expand(height, width)
+
+    source_x = x - float(direction) * disparity.to(dtype=dtype) * 0.5
+
+    denom_x = max(width - 1, 1)
+    denom_y = max(height - 1, 1)
+    grid_x = (2.0 * source_x / denom_x) - 1.0
+    grid_y = (2.0 * y / denom_y) - 1.0
+    grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0)
+
+    frame_nchw = frame.to(dtype=dtype).permute(2, 0, 1).unsqueeze(0)
+    warped = torch.nn.functional.grid_sample(
+        frame_nchw,
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    return warped.squeeze(0).permute(1, 2, 0)
+
+
 def _forward_warp_eye_torch(frame, depth, shifted_x, *, torch):
     if not _has_scatter_reduce_support(torch):
         raise RuntimeError(
@@ -160,15 +198,10 @@ def synthesize_stereo_views_torch(
 
     device = torch.device("cuda")
     frame_tensor = torch.from_numpy(frame_bgr).to(device=device, dtype=torch.float32)
-    depth_tensor = torch.from_numpy(prepared_depth).to(device=device, dtype=torch.float32)
-    x_coords = torch.arange(width, device=device, dtype=torch.float32).view(1, width).expand(height, width)
     disparity_tensor = torch.from_numpy(disparity).to(device=device, dtype=torch.float32)
 
-    left_shifted_x = x_coords - (disparity_tensor * 0.5)
-    right_shifted_x = x_coords + (disparity_tensor * 0.5)
-
-    left_eye = _forward_warp_eye_torch(frame_tensor, depth_tensor, left_shifted_x, torch=torch)
-    right_eye = _forward_warp_eye_torch(frame_tensor, depth_tensor, right_shifted_x, torch=torch)
+    left_eye = _backward_warp_eye_torch(frame_tensor, disparity_tensor, direction=-1.0, torch=torch)
+    right_eye = _backward_warp_eye_torch(frame_tensor, disparity_tensor, direction=+1.0, torch=torch)
 
     left_eye = _clamp_to_numpy_dtype(left_eye, frame_bgr.dtype)
     right_eye = _clamp_to_numpy_dtype(right_eye, frame_bgr.dtype)
