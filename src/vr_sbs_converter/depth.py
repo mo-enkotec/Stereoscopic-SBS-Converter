@@ -256,6 +256,48 @@ def _midas_torch_preprocess(
     return tensor
 
 
+def _extract_processor_size(size_attr, *, default: int = 384) -> tuple[int, int]:
+    """Extract ``(height, width)`` from a HuggingFace image processor size.
+
+    HuggingFace transformers 4.x may return a plain ``dict``, a ``SizeDict``
+    dataclass (with ``.height``/``.width``/``.shortest_edge`` attributes), a
+    single ``int``, or ``None``. This helper handles all four forms without
+    relying on ``isinstance(size_attr, dict)`` (``SizeDict`` is not a dict
+    subclass in newer transformers releases).
+    """
+    if size_attr is None:
+        return (default, default)
+
+    def _as_int(value, fallback: int) -> int:
+        if value is None:
+            return fallback
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    if isinstance(size_attr, (int, float)):
+        return (int(size_attr), int(size_attr))
+
+    # Try attribute access first (SizeDict), then dict-style access.
+    height = getattr(size_attr, "height", None)
+    width = getattr(size_attr, "width", None)
+    shortest = getattr(size_attr, "shortest_edge", None)
+    if height is None or width is None:
+        getter = getattr(size_attr, "get", None)
+        if callable(getter):
+            height = height if height is not None else getter("height")
+            width = width if width is not None else getter("width")
+            shortest = shortest if shortest is not None else getter("shortest_edge")
+
+    if height is None and shortest is not None:
+        height = shortest
+    if width is None:
+        width = height if height is not None else shortest
+
+    return (_as_int(height, default), _as_int(width, default))
+
+
 class MidasDepthEstimator(DepthEstimator):
     def __init__(
         self,
@@ -317,12 +359,8 @@ class MidasDepthEstimator(DepthEstimator):
         self._processor = processor
         mean_values = getattr(processor, "image_mean", None) or [0.5, 0.5, 0.5]
         std_values = getattr(processor, "image_std", None) or [0.5, 0.5, 0.5]
-        size_attr = getattr(processor, "size", None) or {"height": 384, "width": 384}
-        if isinstance(size_attr, dict):
-            input_h = int(size_attr.get("height", size_attr.get("shortest_edge", 384)))
-            input_w = int(size_attr.get("width", input_h))
-        else:
-            input_h = input_w = int(size_attr)
+        size_attr = getattr(processor, "size", None)
+        input_h, input_w = _extract_processor_size(size_attr, default=384)
         self._preproc_mean = torch.tensor(mean_values, dtype=torch.float32).view(1, 3, 1, 1).to(torch_device)
         self._preproc_std = torch.tensor(std_values, dtype=torch.float32).view(1, 3, 1, 1).to(torch_device)
         self._preproc_size = (input_h, input_w)

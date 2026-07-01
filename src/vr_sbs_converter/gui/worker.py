@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from threading import Event
 from typing import Any
 
@@ -39,8 +40,10 @@ class ConversionWorker(QObject):
         except ConversionCancelledError:
             self.canceled.emit()
         except RuntimeError as exc:
+            traceback.print_exc()
             self.failed.emit(str(exc))
         except Exception as exc:  # pragma: no cover - defensive guard
+            traceback.print_exc()
             self.failed.emit(str(exc))
 
     def _emit_start(self, payload: dict[str, Any]) -> None:

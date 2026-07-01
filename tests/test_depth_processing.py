@@ -480,3 +480,52 @@ def test_condition_depth_torch_avoids_cuda_scalar_synchronization() -> None:
     source = inspect.getsource(depth_module)
 
     assert "bool(" not in source
+
+
+def test_extract_processor_size_from_plain_dict() -> None:
+    from vr_sbs_converter.depth import _extract_processor_size
+
+    assert _extract_processor_size({"height": 384, "width": 256}) == (384, 256)
+    assert _extract_processor_size({"height": 512}) == (512, 512)
+    assert _extract_processor_size({"shortest_edge": 320}) == (320, 320)
+
+
+def test_extract_processor_size_from_none_uses_default() -> None:
+    from vr_sbs_converter.depth import _extract_processor_size
+
+    assert _extract_processor_size(None) == (384, 384)
+    assert _extract_processor_size(None, default=256) == (256, 256)
+
+
+def test_extract_processor_size_from_int() -> None:
+    from vr_sbs_converter.depth import _extract_processor_size
+
+    assert _extract_processor_size(384) == (384, 384)
+    assert _extract_processor_size(224) == (224, 224)
+
+
+def test_extract_processor_size_from_size_dict_object() -> None:
+    """HuggingFace transformers 4.x may return a SizeDict dataclass; make sure we handle it."""
+    from vr_sbs_converter.depth import _extract_processor_size
+
+    class _FakeSizeDict:
+        def __init__(self, height=None, width=None, shortest_edge=None):
+            self.height = height
+            self.width = width
+            self.shortest_edge = shortest_edge
+
+    assert _extract_processor_size(_FakeSizeDict(height=384, width=384)) == (384, 384)
+    assert _extract_processor_size(_FakeSizeDict(shortest_edge=320)) == (320, 320)
+    assert _extract_processor_size(_FakeSizeDict(height=480, width=640)) == (480, 640)
+
+
+def test_extract_processor_size_ignores_non_int_values() -> None:
+    """SizeDict attributes that aren't int-coercible fall back to default."""
+    from vr_sbs_converter.depth import _extract_processor_size
+
+    class _FakeSizeDict:
+        height = {"nested": "value"}
+        width = None
+        shortest_edge = None
+
+    assert _extract_processor_size(_FakeSizeDict(), default=384) == (384, 384)
