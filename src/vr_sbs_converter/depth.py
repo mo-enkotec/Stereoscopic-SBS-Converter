@@ -220,6 +220,7 @@ def _midas_torch_preprocess(
     std,
     target_size: tuple[int, int],
     dtype=None,
+    pinned_buffer=None,
 ):
     """Torch-native replacement for HuggingFace ``AutoImageProcessor``.
 
@@ -230,7 +231,15 @@ def _midas_torch_preprocess(
     processor. If ``dtype`` is given (e.g. ``torch.float16``) the result is
     cast at the end so the model receives its expected precision.
     """
-    tensor = torch.from_numpy(rgb).to(device=device, dtype=torch.float32)
+    if pinned_buffer is None:
+        tensor = torch.from_numpy(rgb).to(device=device, dtype=torch.float32)
+    else:
+        if tuple(pinned_buffer.shape) != tuple(rgb.shape):
+            raise ValueError(
+                f"pinned_buffer shape {tuple(pinned_buffer.shape)} must match rgb shape {tuple(rgb.shape)}"
+            )
+        pinned_buffer.copy_(torch.from_numpy(rgb))
+        tensor = pinned_buffer.to(device=device, dtype=torch.float32, non_blocking=True)
     tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.0
     if tuple(tensor.shape[-2:]) != tuple(target_size):
         tensor = torch.nn.functional.interpolate(
@@ -269,6 +278,7 @@ class MidasDepthEstimator(DepthEstimator):
         self._preproc_std = None
         self._preproc_size: tuple[int, int] | None = None
         self._depth_conditioning_kernel_cache = {}
+        self._pinned_rgb_buffers: dict[tuple[int, int, int], "torch.Tensor"] = {}
 
     def _resolve_device(self) -> str:
         if self._device == "cpu":
@@ -277,6 +287,16 @@ class MidasDepthEstimator(DepthEstimator):
             return "cuda"
         assert self._torch is not None
         return "cuda" if self._torch.cuda.is_available() else "cpu"
+
+    def _get_pinned_rgb_buffer(self, shape: tuple[int, int, int]):
+        if self._resolve_device() != "cuda":
+            return None
+        assert self._torch is not None
+        cached = self._pinned_rgb_buffers.get(shape)
+        if cached is None:
+            cached = self._torch.empty(shape, dtype=self._torch.uint8, pin_memory=True)
+            self._pinned_rgb_buffers[shape] = cached
+        return cached
 
     def _load(self) -> None:
         if self._model is not None and self._preproc_size is not None:
@@ -331,6 +351,9 @@ class MidasDepthEstimator(DepthEstimator):
         torch_device = self._resolve_device()
         use_autocast = self._use_fp16 and torch_device == "cuda"
         model_dtype = torch.float16 if use_autocast else torch.float32
+        pinned_buffer = (
+            self._get_pinned_rgb_buffer(inference_rgb.shape) if torch_device == "cuda" else None
+        )
         pixel_values = _midas_torch_preprocess(
             inference_rgb,
             torch=torch,
@@ -339,6 +362,7 @@ class MidasDepthEstimator(DepthEstimator):
             std=self._preproc_std,
             target_size=self._preproc_size,
             dtype=model_dtype,
+            pinned_buffer=pinned_buffer,
         )
 
         with torch.no_grad():

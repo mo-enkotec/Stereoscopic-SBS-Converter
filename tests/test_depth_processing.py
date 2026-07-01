@@ -122,6 +122,113 @@ def test_midas_torch_preprocess_supports_fp16_output() -> None:
     assert out.dtype == torch.float16
 
 
+def test_midas_torch_preprocess_with_pinned_buffer_matches_unpinned() -> None:
+    from vr_sbs_converter.depth import _midas_torch_preprocess
+
+    torch = _import_torch_or_skip()
+    rng = np.random.default_rng(42)
+    rgb = rng.integers(0, 256, size=(8, 12, 3), dtype=np.uint8)
+    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+    pinned_buffer = torch.empty(rgb.shape, dtype=torch.uint8)
+
+    unpinned = _midas_torch_preprocess(
+        rgb,
+        torch=torch,
+        device=torch.device("cpu"),
+        mean=mean,
+        std=std,
+        target_size=(6, 10),
+        dtype=torch.float32,
+    )
+    staged = _midas_torch_preprocess(
+        rgb,
+        torch=torch,
+        device=torch.device("cpu"),
+        mean=mean,
+        std=std,
+        target_size=(6, 10),
+        dtype=torch.float32,
+        pinned_buffer=pinned_buffer,
+    )
+
+    assert torch.allclose(staged, unpinned, atol=1e-5)
+
+
+def test_midas_torch_preprocess_pinned_buffer_shape_mismatch_raises_or_falls_back() -> None:
+    import pytest
+
+    from vr_sbs_converter.depth import _midas_torch_preprocess
+
+    torch = _import_torch_or_skip()
+    rgb = np.zeros((8, 12, 3), dtype=np.uint8)
+    mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+    std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+    wrong_shape_buffer = torch.empty((8, 11, 3), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="pinned_buffer shape .* must match rgb shape"):
+        _midas_torch_preprocess(
+            rgb,
+            torch=torch,
+            device=torch.device("cpu"),
+            mean=mean,
+            std=std,
+            target_size=(8, 12),
+            pinned_buffer=wrong_shape_buffer,
+        )
+
+
+def test_get_pinned_rgb_buffer_caches_by_shape(monkeypatch) -> None:
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    calls = []
+
+    class FakeTorch:
+        uint8 = object()
+
+        @staticmethod
+        def empty(shape, *, dtype, pin_memory):
+            calls.append((shape, dtype, pin_memory))
+            return {"shape": shape}
+
+    estimator = MidasDepthEstimator(device="cuda")
+    estimator._torch = FakeTorch()
+    monkeypatch.setattr(estimator, "_resolve_device", lambda: "cuda")
+
+    first = estimator._get_pinned_rgb_buffer((10, 20, 3))
+    second = estimator._get_pinned_rgb_buffer((10, 20, 3))
+
+    assert second is first
+    assert calls == [((10, 20, 3), FakeTorch.uint8, True)]
+
+
+def test_get_pinned_rgb_buffer_creates_separate_buffers_for_different_shapes(monkeypatch) -> None:
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    calls = []
+
+    class FakeTorch:
+        uint8 = object()
+
+        @staticmethod
+        def empty(shape, *, dtype, pin_memory):
+            calls.append((shape, dtype, pin_memory))
+            return {"shape": shape}
+
+    estimator = MidasDepthEstimator(device="cuda")
+    estimator._torch = FakeTorch()
+    monkeypatch.setattr(estimator, "_resolve_device", lambda: "cuda")
+
+    first = estimator._get_pinned_rgb_buffer((10, 20, 3))
+    second = estimator._get_pinned_rgb_buffer((12, 20, 3))
+
+    assert second is not first
+    assert calls == [
+        ((10, 20, 3), FakeTorch.uint8, True),
+        ((12, 20, 3), FakeTorch.uint8, True),
+    ]
+
+
 def test_condition_depth_torch_matches_numpy_within_tolerance() -> None:
     from vr_sbs_converter.depth import _condition_depth_for_stereo_torch
 
