@@ -737,3 +737,69 @@ def test_run_conversion_emits_live_top5_function_stats_during_run(monkeypatch, t
 
     assert any("Function timing top-5:" in message for message in status_events)
     assert any("Function timing summary:" in message for message in status_events)
+
+
+def test_run_conversion_estimates_depth_on_source_resolution_when_upscaling(
+    monkeypatch, tmp_path: Path
+) -> None:
+    input_video = tmp_path / "in.mp4"
+    output_video = tmp_path / "out.mp4"
+    input_video.write_bytes(b"fake")
+
+    source_frame = np.zeros((120, 240, 3), dtype=np.uint8)
+    frames = iter([source_frame, None])
+    depth_input_shapes: list[tuple[int, ...]] = []
+    stereo_input_shapes: list[tuple[int, ...]] = []
+
+    class _RecordingDepthEstimator:
+        @staticmethod
+        def estimate(frame):
+            depth_input_shapes.append(frame.shape)
+            return np.ones(frame.shape[:2], dtype=np.float32)
+
+    def _fake_synthesize(**kwargs):
+        stereo_input_shapes.append(kwargs["frame_bgr"].shape)
+        frame = kwargs["frame_bgr"]
+        return frame.copy(), frame.copy()
+
+    monkeypatch.setattr("vr_sbs_converter.pipeline.ensure_ffmpeg_installed", lambda: None)
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.probe_video",
+        lambda _path: VideoMetadata(
+            width=240,
+            height=120,
+            fps=24.0,
+            duration_seconds=0.0,
+            total_frames=1,
+            has_audio=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.create_depth_estimator",
+        lambda *args, **kwargs: _RecordingDepthEstimator(),
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_reader", lambda _path: object())
+    monkeypatch.setattr("vr_sbs_converter.pipeline.open_frame_writer", lambda **kwargs: object())
+    monkeypatch.setattr(
+        "vr_sbs_converter.pipeline.read_raw_frame", lambda *_args, **_kwargs: next(frames)
+    )
+    monkeypatch.setattr("vr_sbs_converter.pipeline.write_raw_frame", lambda _writer, _frame: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_reader", lambda _reader: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.close_writer", lambda _writer: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.concat_video_segments", lambda **_kwargs: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.shutil.move", lambda _src, _dst: None)
+    monkeypatch.setattr("vr_sbs_converter.pipeline.synthesize_stereo_views", _fake_synthesize)
+
+    config = ConversionConfig(
+        input_path=input_video,
+        output_path=output_video,
+        depth_backend="luma",
+        upscale=True,
+        target_height=480,
+        overwrite=True,
+        compat_profile="off",
+    )
+    run_conversion(config, callbacks=None, use_parallel=False)
+
+    assert depth_input_shapes == [(120, 240, 3)]
+    assert stereo_input_shapes and stereo_input_shapes[0] == (480, 960, 3)

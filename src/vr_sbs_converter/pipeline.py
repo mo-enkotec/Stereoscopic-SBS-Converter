@@ -327,10 +327,6 @@ def run_conversion(
                     decode_time += decode_elapsed
                 if frame is None:
                     break
-                if upscaler is not None:
-                    upscale_started = perf_counter()
-                    frame = upscaler.upscale(frame, process_width, process_height)
-                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
 
                 depth_started = perf_counter()
                 depth = depth_estimator.estimate(frame)
@@ -338,6 +334,11 @@ def run_conversion(
                 function_timing.record("depth_estimate", depth_elapsed * 1000.0)
                 with timing_lock:
                     depth_time += depth_elapsed
+
+                if upscaler is not None:
+                    upscale_started = perf_counter()
+                    frame = upscaler.upscale(frame, process_width, process_height)
+                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
 
                 stereo_started = perf_counter()
                 left_eye, right_eye = synthesize_stereo_views(
@@ -380,10 +381,6 @@ def run_conversion(
                 function_timing.record("read_raw_frame", decode_elapsed * 1000.0)
                 with timing_lock:
                     decode_time += decode_elapsed
-                if frame_payload is not None and upscaler is not None:
-                    upscale_started = perf_counter()
-                    frame_payload = upscaler.upscale(frame_payload, process_width, process_height)
-                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
                 return frame_payload
 
             def _estimate_depth(frame_payload: np.ndarray) -> np.ndarray:
@@ -398,6 +395,10 @@ def run_conversion(
 
             def _synthesize_stereo(frame_payload: np.ndarray, depth_payload: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
                 nonlocal stereo_time
+                if upscaler is not None:
+                    upscale_started = perf_counter()
+                    frame_payload = upscaler.upscale(frame_payload, process_width, process_height)
+                    function_timing.record("upscale", (perf_counter() - upscale_started) * 1000.0)
                 stereo_started = perf_counter()
                 stereo_payload = stereo_backend.synthesize(
                     frame_payload,
