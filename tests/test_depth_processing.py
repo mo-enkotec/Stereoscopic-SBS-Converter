@@ -47,3 +47,65 @@ def test_condition_depth_does_not_require_bilateral_filter(monkeypatch) -> None:
     monkeypatch.setattr(cv2, "bilateralFilter", _fail_bilateral)
     conditioned = condition_depth_for_stereo(depth, guide, edge_protect_strength=0.75)
     assert conditioned.shape == depth.shape
+
+
+def test_midas_torch_preprocess_normalizes_with_mean_and_std_on_target_size() -> None:
+    import pytest
+
+    torch = None
+    try:
+        import torch as _torch
+        torch = _torch
+    except Exception:
+        pytest.skip("torch unavailable")
+
+    from vr_sbs_converter.depth import _midas_torch_preprocess
+
+    rgb = np.full((10, 20, 3), 128, dtype=np.uint8)
+    mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+    std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+
+    out = _midas_torch_preprocess(
+        rgb,
+        torch=torch,
+        device=torch.device("cpu"),
+        mean=mean,
+        std=std,
+        target_size=(6, 12),
+        dtype=torch.float32,
+    )
+
+    assert tuple(out.shape) == (1, 3, 6, 12)
+    assert out.dtype == torch.float32
+    # (128/255 - 0.5) / 0.5 ≈ 0.00392
+    assert float(out.mean().item()) == pytest.approx(0.00392, abs=1e-3)
+
+
+def test_midas_torch_preprocess_supports_fp16_output() -> None:
+    import pytest
+
+    torch = None
+    try:
+        import torch as _torch
+        torch = _torch
+    except Exception:
+        pytest.skip("torch unavailable")
+
+    from vr_sbs_converter.depth import _midas_torch_preprocess
+
+    rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+    std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(1, 3, 1, 1)
+
+    out = _midas_torch_preprocess(
+        rgb,
+        torch=torch,
+        device=torch.device("cpu"),
+        mean=mean,
+        std=std,
+        target_size=(4, 4),
+        dtype=torch.float16,
+    )
+
+    assert out.dtype == torch.float16
+

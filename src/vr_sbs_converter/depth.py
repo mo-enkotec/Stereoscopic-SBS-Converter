@@ -81,6 +81,42 @@ class LumaDepthEstimator(DepthEstimator):
         return self._smoother.apply(conditioned)
 
 
+def _midas_torch_preprocess(
+    rgb: np.ndarray,
+    *,
+    torch,
+    device,
+    mean,
+    std,
+    target_size: tuple[int, int],
+    dtype=None,
+):
+    """Torch-native replacement for HuggingFace ``AutoImageProcessor``.
+
+    Skips the PIL round-trip that dominates per-frame overhead. Uploads the
+    numpy RGB frame straight to ``device`` as a float32 tensor, rescales to
+    the model's expected input size with bicubic interpolation, then applies
+    the same ``(x/255 - mean) / std`` normalization used by the DPT
+    processor. If ``dtype`` is given (e.g. ``torch.float16``) the result is
+    cast at the end so the model receives its expected precision.
+    """
+    tensor = torch.from_numpy(rgb).to(device=device, dtype=torch.float32)
+    tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.0
+    if tuple(tensor.shape[-2:]) != tuple(target_size):
+        tensor = torch.nn.functional.interpolate(
+            tensor,
+            size=(int(target_size[0]), int(target_size[1])),
+            mode="bicubic",
+            align_corners=False,
+        )
+    tensor = (tensor - mean.to(device=device, dtype=torch.float32)) / std.to(
+        device=device, dtype=torch.float32
+    )
+    if dtype is not None and dtype != torch.float32:
+        tensor = tensor.to(dtype=dtype)
+    return tensor
+
+
 class MidasDepthEstimator(DepthEstimator):
     def __init__(
         self,
@@ -99,6 +135,9 @@ class MidasDepthEstimator(DepthEstimator):
         self._edge_protect_strength = edge_protect_strength
         self._depth_process_scale = depth_process_scale
         self._use_fp16 = use_fp16
+        self._preproc_mean = None
+        self._preproc_std = None
+        self._preproc_size: tuple[int, int] | None = None
 
     def _resolve_device(self) -> str:
         if self._device == "cpu":
@@ -109,14 +148,30 @@ class MidasDepthEstimator(DepthEstimator):
         return "cuda" if self._torch.cuda.is_available() else "cpu"
 
     def _load(self) -> None:
-        if self._model is not None and self._processor is not None:
+        if self._model is not None and self._preproc_size is not None:
             return
         import torch  # type: ignore
         from transformers import AutoImageProcessor, DPTForDepthEstimation  # type: ignore
 
         self._torch = torch
         torch_device = self._resolve_device()
-        self._processor = AutoImageProcessor.from_pretrained(self._model_name)
+        # Load the HF processor once purely to extract preprocessing constants
+        # (image_mean, image_std, and target size), then discard the per-call
+        # PIL/dict overhead by using a torch-native preprocess.
+        processor = AutoImageProcessor.from_pretrained(self._model_name)
+        self._processor = processor
+        mean_values = getattr(processor, "image_mean", None) or [0.5, 0.5, 0.5]
+        std_values = getattr(processor, "image_std", None) or [0.5, 0.5, 0.5]
+        size_attr = getattr(processor, "size", None) or {"height": 384, "width": 384}
+        if isinstance(size_attr, dict):
+            input_h = int(size_attr.get("height", size_attr.get("shortest_edge", 384)))
+            input_w = int(size_attr.get("width", input_h))
+        else:
+            input_h = input_w = int(size_attr)
+        self._preproc_mean = torch.tensor(mean_values, dtype=torch.float32).view(1, 3, 1, 1).to(torch_device)
+        self._preproc_std = torch.tensor(std_values, dtype=torch.float32).view(1, 3, 1, 1).to(torch_device)
+        self._preproc_size = (input_h, input_w)
+
         self._model = DPTForDepthEstimation.from_pretrained(self._model_name)
         self._model.to(torch_device)
         if self._use_fp16 and torch_device == "cuda":
@@ -126,8 +181,11 @@ class MidasDepthEstimator(DepthEstimator):
 
     def estimate(self, frame_bgr: np.ndarray) -> np.ndarray:
         self._load()
-        assert self._model is not None and self._processor is not None and self._torch is not None
+        assert self._model is not None and self._torch is not None
+        assert self._preproc_mean is not None and self._preproc_std is not None
+        assert self._preproc_size is not None
 
+        torch = self._torch
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         inference_rgb = rgb
         if self._depth_process_scale < 1.0:
@@ -139,14 +197,22 @@ class MidasDepthEstimator(DepthEstimator):
                 interpolation=cv2.INTER_AREA,
             )
 
-        inputs = self._processor(images=inference_rgb, return_tensors="pt")
         torch_device = self._resolve_device()
-        inputs = {key: value.to(torch_device) for key, value in inputs.items()}
+        use_autocast = self._use_fp16 and torch_device == "cuda"
+        model_dtype = torch.float16 if use_autocast else torch.float32
+        pixel_values = _midas_torch_preprocess(
+            inference_rgb,
+            torch=torch,
+            device=torch_device,
+            mean=self._preproc_mean,
+            std=self._preproc_std,
+            target_size=self._preproc_size,
+            dtype=model_dtype,
+        )
 
         with self._torch.no_grad():
-            use_autocast = self._use_fp16 and torch_device == "cuda"
             with self._torch.cuda.amp.autocast(enabled=use_autocast):
-                predicted = self._model(**inputs).predicted_depth
+                predicted = self._model(pixel_values=pixel_values).predicted_depth
                 resized = self._torch.nn.functional.interpolate(
                     predicted.unsqueeze(1),
                     size=rgb.shape[:2],
