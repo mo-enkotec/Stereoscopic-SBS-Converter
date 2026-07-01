@@ -6,10 +6,12 @@ import pytest
 
 from vr_sbs_converter.stereo import _disparity_map, _prepare_depth, synthesize_stereo_views
 from vr_sbs_converter.stereo_torch import (
+    create_encoder_readback_stream,
     _forward_warp_eye_torch,
     _import_torch,
     is_torch_cuda_stereo_available,
     select_stereo_synthesis_backend,
+    tensor_frame_to_numpy_async,
 )
 
 
@@ -90,6 +92,150 @@ def test_selected_cpu_backend_preserves_shape_dtype_and_range() -> None:
     assert right_eye.dtype == frame.dtype
     assert int(left_eye.min()) >= 0 and int(left_eye.max()) <= 255
     assert int(right_eye.min()) >= 0 and int(right_eye.max()) <= 255
+
+
+def test_tensor_frame_to_numpy_async_falls_back_for_numpy_input() -> None:
+    frame = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+
+    result = tensor_frame_to_numpy_async(frame)
+
+    assert result is frame
+
+
+def test_tensor_frame_to_numpy_async_returns_numpy_from_cpu_tensor() -> None:
+    torch = _import_torch()
+    if torch is None:
+        pytest.skip("torch unavailable")
+
+    tensor = torch.tensor(
+        [[[0.0, 127.4, 255.0], [300.0, -10.0, 12.6]]],
+        dtype=torch.float32,
+    )
+
+    result = tensor_frame_to_numpy_async(tensor)
+
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (1, 2, 3)
+    assert result.dtype == np.uint8
+    np.testing.assert_array_equal(result, np.array([[[0, 127, 255], [255, 0, 13]]], dtype=np.uint8))
+
+
+def test_tensor_frame_to_numpy_async_uses_provided_stream_and_synchronizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vr_sbs_converter.stereo_torch as stereo_torch_module
+
+    events: list[str] = []
+    default_stream = object()
+
+    class _FakeDevice:
+        type = "cuda"
+
+    class _SpyStream:
+        def wait_stream(self, stream) -> None:
+            assert stream is default_stream
+            events.append("wait_stream")
+
+        def synchronize(self) -> None:
+            events.append("synchronize")
+
+    class _FakeCudaStreamContext:
+        def __init__(self, stream) -> None:
+            self.stream = stream
+
+        def __enter__(self):
+            events.append("enter_stream")
+            return self.stream
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            events.append("exit_stream")
+
+    class _FakeTensor:
+        device = _FakeDevice()
+        shape = (1, 2, 3)
+
+        def __init__(self, *, dtype="float32") -> None:
+            self.dtype = dtype
+
+        def round(self):
+            events.append("round")
+            return self
+
+        def clamp(self, minimum, maximum):
+            assert (minimum, maximum) == (0, 255)
+            events.append("clamp")
+            return self
+
+        def to(self, *, dtype):
+            self.dtype = dtype
+            events.append("to_uint8")
+            return self
+
+        def detach(self):
+            events.append("detach")
+            return self
+
+    class _FakeDestTensor:
+        def __init__(self, shape, dtype, device, pin_memory) -> None:
+            assert shape == _FakeTensor.shape
+            assert dtype == _FakeTorch.uint8
+            assert device == "cpu"
+            assert pin_memory is True
+
+        def copy_(self, src, *, non_blocking):
+            assert isinstance(src, _FakeTensor)
+            assert non_blocking is True
+            events.append("copy")
+            return self
+
+        def numpy(self):
+            events.append("numpy")
+            return np.arange(6, dtype=np.uint8).reshape(1, 2, 3)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def current_stream():
+            return default_stream
+
+        @staticmethod
+        def stream(stream):
+            return _FakeCudaStreamContext(stream)
+
+    class _FakeTorch:
+        Tensor = _FakeTensor
+        cuda = _FakeCuda()
+        uint8 = "uint8"
+
+        @staticmethod
+        def empty(shape, *, dtype, device, pin_memory):
+            events.append("empty")
+            return _FakeDestTensor(shape, dtype, device, pin_memory)
+
+    stream = _SpyStream()
+    monkeypatch.setattr(stereo_torch_module, "_import_torch", lambda: _FakeTorch())
+
+    result = tensor_frame_to_numpy_async(_FakeTensor(), stream=stream)
+
+    assert result.shape == (1, 2, 3)
+    assert result.dtype == np.uint8
+    assert events.index("wait_stream") < events.index("copy")
+    assert events.index("copy") < events.index("synchronize")
+
+
+def test_create_encoder_readback_stream_returns_none_without_cuda() -> None:
+    class _FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    assert create_encoder_readback_stream(torch_module=_FakeTorch()) is None
 
 
 def test_torch_cuda_backend_executes_or_skips_cleanly() -> None:
@@ -277,5 +423,4 @@ def test_backward_warp_fp16_matches_fp32_within_tolerance() -> None:
     # Cast + interpolation in fp16 should be near-identical for values <255.
     assert float(diff.mean().item()) < 0.6
     assert float(diff.max().item()) < 4.0
-
 

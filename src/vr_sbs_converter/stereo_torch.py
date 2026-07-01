@@ -40,8 +40,9 @@ def is_torch_cuda_stereo_available(*, torch_module=None) -> bool:
         return False
 
 
-def _clamp_to_numpy_dtype(tensor, dtype: np.dtype):
-    torch = importlib.import_module("torch")
+def _clamp_to_numpy_dtype(tensor, dtype: np.dtype, *, torch_module=None):
+    dtype = np.dtype(dtype)
+    torch = importlib.import_module("torch") if torch_module is None else torch_module
     if np.issubdtype(dtype, np.integer):
         info = np.iinfo(dtype)
         tensor = tensor.round().clamp(info.min, info.max)
@@ -65,6 +66,55 @@ def tensor_frame_to_numpy(payload, dtype: np.dtype = np.dtype(np.uint8)) -> np.n
     if torch is None or not isinstance(payload, torch.Tensor):
         return np.asarray(payload)
     return _convert_back_to_numpy_dtype(payload, dtype)
+
+
+def _copy_tensor_to_pinned_cpu(torch, tensor):
+    try:
+        destination = torch.empty(
+            tuple(tensor.shape),
+            dtype=tensor.dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+    except (RuntimeError, TypeError):
+        return tensor.detach().to(device="cpu", non_blocking=True)
+    destination.copy_(tensor.detach(), non_blocking=True)
+    return destination
+
+
+def tensor_frame_to_numpy_async(payload, dtype=np.uint8, stream=None) -> np.ndarray:
+    """Convert a frame tensor to numpy, using a CUDA readback stream when possible."""
+    if isinstance(payload, np.ndarray):
+        return payload
+
+    torch = _import_torch()
+    if torch is None or not isinstance(payload, torch.Tensor):
+        return np.asarray(payload)
+
+    dtype = np.dtype(dtype)
+    if getattr(getattr(payload, "device", None), "type", None) != "cuda":
+        return _convert_back_to_numpy_dtype(payload, dtype)
+
+    readback_stream = stream if stream is not None else torch.cuda.current_stream()
+    readback_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(readback_stream):
+        tensor = _clamp_to_numpy_dtype(payload, dtype, torch_module=torch)
+        cpu_tensor = _copy_tensor_to_pinned_cpu(torch, tensor)
+    readback_stream.synchronize()
+    return cpu_tensor.numpy().astype(dtype, copy=False)
+
+
+def create_encoder_readback_stream(*, torch_module=None):
+    """Create a dedicated CUDA stream for encoder readback, or None without CUDA."""
+    torch = _import_torch() if torch_module is None else torch_module
+    if torch is None:
+        return None
+    try:
+        if not torch.cuda.is_available():
+            return None
+        return torch.cuda.Stream()
+    except Exception:
+        return None
 
 
 def _linear_horizontal_sample(frame, x_map):

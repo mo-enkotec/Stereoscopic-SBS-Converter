@@ -30,7 +30,11 @@ from .ffmpeg_utils import FFmpegError, ensure_ffmpeg_installed, probe_video
 from .perf_stats import FunctionTimingCollector, format_function_timing_top
 from .pipeline_parallel import run_parallel_conversion_configured
 from .stereo import compose_sbs, synthesize_stereo_views
-from .stereo_torch import select_stereo_synthesis_backend, tensor_frame_to_numpy
+from .stereo_torch import (
+    create_encoder_readback_stream,
+    select_stereo_synthesis_backend,
+    tensor_frame_to_numpy_async,
+)
 from .upscaling import compute_target_dimensions, create_default_upscaler
 from .video_io import (
     VideoIOError,
@@ -372,6 +376,7 @@ def run_conversion(
             nonlocal decode_time, depth_time, stereo_time, encode_time, frames_processed, frames_processed_this_run
 
             stereo_backend = select_stereo_synthesis_backend(config.device)
+            encoder_stream = create_encoder_readback_stream()
 
             def _read_frame() -> np.ndarray | None:
                 nonlocal decode_time
@@ -426,7 +431,7 @@ def run_conversion(
             def _write_frame(_frame_index: int, sbs_frame_payload) -> None:
                 nonlocal encode_time, frames_processed, frames_processed_this_run
                 encode_started = perf_counter()
-                sbs_frame_numpy = tensor_frame_to_numpy(sbs_frame_payload)
+                sbs_frame_numpy = tensor_frame_to_numpy_async(sbs_frame_payload, stream=encoder_stream)
                 write_raw_frame(writer, sbs_frame_numpy)
                 encode_elapsed = perf_counter() - encode_started
                 function_timing.record("write_raw_frame", encode_elapsed * 1000.0)
