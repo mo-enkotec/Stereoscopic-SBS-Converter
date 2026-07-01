@@ -256,6 +256,38 @@ def _midas_torch_preprocess(
     return tensor
 
 
+def _triton_available() -> bool:
+    """Return True only if a working ``triton`` install is importable.
+
+    ``torch.compile(mode='reduce-overhead')`` requires triton for the
+    inductor backend. If triton is missing, compile appears to succeed
+    but every forward call raises. Pre-flight this so we skip cleanly.
+    """
+    try:
+        import importlib
+
+        importlib.import_module("triton")
+        return True
+    except Exception:
+        return False
+
+
+def _autocast_ctx(torch, *, device_type: str, enabled: bool):
+    """Version-compatible autocast context.
+
+    Prefers the new ``torch.amp.autocast`` API and falls back to the
+    deprecated ``torch.cuda.amp.autocast`` on older torch.
+    """
+    amp = getattr(torch, "amp", None)
+    autocast = getattr(amp, "autocast", None) if amp is not None else None
+    if autocast is not None:
+        try:
+            return autocast(device_type=device_type, enabled=enabled)
+        except TypeError:
+            pass
+    return torch.cuda.amp.autocast(enabled=enabled)
+
+
 def _extract_processor_size(size_attr, *, default: int = 384) -> tuple[int, int]:
     """Extract ``(height, width)`` from a HuggingFace image processor size.
 
@@ -372,23 +404,32 @@ class MidasDepthEstimator(DepthEstimator):
             torch.backends.cudnn.benchmark = True
         self._model.eval()
         if self._depth_compile and torch_device == "cuda" and hasattr(torch, "compile"):
-            uncompiled_model = self._model
-            try:
-                self._model = torch.compile(
-                    uncompiled_model,
-                    mode="reduce-overhead",
-                    fullgraph=False,
-                    dynamic=False,
-                )
-                self._uncompiled_model = uncompiled_model
-                self._compiled = True
-            except Exception as exc:
+            if not _triton_available():
                 warnings.warn(
-                    f"torch.compile failed for MiDaS ({exc}); using uncompiled MiDaS fallback.",
+                    "depth_compile requested but a working triton install was not found; "
+                    "using uncompiled MiDaS. Install triton (pip install triton) to enable.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 self._compiled = False
+            else:
+                uncompiled_model = self._model
+                try:
+                    self._model = torch.compile(
+                        uncompiled_model,
+                        mode="reduce-overhead",
+                        fullgraph=False,
+                        dynamic=False,
+                    )
+                    self._uncompiled_model = uncompiled_model
+                    self._compiled = True
+                except Exception as exc:
+                    warnings.warn(
+                        f"torch.compile failed for MiDaS ({exc}); using uncompiled MiDaS fallback.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    self._compiled = False
 
     def _predict_depth(self, pixel_values):
         assert self._model is not None
@@ -443,7 +484,7 @@ class MidasDepthEstimator(DepthEstimator):
         )
 
         with torch.no_grad():
-            with torch.cuda.amp.autocast(enabled=use_autocast):
+            with _autocast_ctx(torch, device_type="cuda", enabled=use_autocast):
                 predicted = self._predict_depth(pixel_values)
                 resized = torch.nn.functional.interpolate(
                     predicted.unsqueeze(1),
@@ -452,7 +493,10 @@ class MidasDepthEstimator(DepthEstimator):
                     align_corners=False,
                 ).squeeze(0).squeeze(0)
             if torch_device == "cuda":
-                frame_bgr_tensor = torch.from_numpy(np.ascontiguousarray(frame_bgr)).to(device=torch_device)
+                frame_bgr_writable = np.ascontiguousarray(frame_bgr)
+                if not frame_bgr_writable.flags.writeable:
+                    frame_bgr_writable = frame_bgr_writable.copy()
+                frame_bgr_tensor = torch.from_numpy(frame_bgr_writable).to(device=torch_device)
                 conditioned_tensor = _condition_depth_for_stereo_torch_impl(
                     resized,
                     frame_bgr_tensor,

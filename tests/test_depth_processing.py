@@ -287,8 +287,10 @@ def test_get_pinned_rgb_buffer_creates_separate_buffers_for_different_shapes(mon
 
 
 def test_midas_load_compiles_model_when_enabled_on_cuda(monkeypatch) -> None:
+    from vr_sbs_converter import depth as depth_module
     from vr_sbs_converter.depth import MidasDepthEstimator
 
+    monkeypatch.setattr(depth_module, "_triton_available", lambda: True)
     compile_calls = []
     compiled_model = object()
 
@@ -331,7 +333,10 @@ def test_midas_load_does_not_compile_model_on_cpu(monkeypatch) -> None:
 def test_midas_load_warns_and_keeps_original_model_when_compile_fails(monkeypatch) -> None:
     import pytest
 
+    from vr_sbs_converter import depth as depth_module
     from vr_sbs_converter.depth import MidasDepthEstimator
+
+    monkeypatch.setattr(depth_module, "_triton_available", lambda: True)
 
     def failing_compile(_model, **_kwargs):
         raise RuntimeError("compile unavailable")
@@ -342,6 +347,30 @@ def test_midas_load_warns_and_keeps_original_model_when_compile_fails(monkeypatc
     with pytest.warns(RuntimeWarning, match="torch.compile failed.*uncompiled MiDaS"):
         estimator._load()
 
+    assert estimator._model is original_model
+    assert estimator._compiled is False
+
+
+def test_midas_load_warns_and_skips_compile_when_triton_missing(monkeypatch) -> None:
+    import pytest
+
+    from vr_sbs_converter import depth as depth_module
+    from vr_sbs_converter.depth import MidasDepthEstimator
+
+    monkeypatch.setattr(depth_module, "_triton_available", lambda: False)
+    compile_calls: list = []
+
+    def unexpected_compile(_model, **_kwargs):
+        compile_calls.append(_model)
+        return object()
+
+    original_model = _install_fake_midas_modules(monkeypatch, unexpected_compile)
+    estimator = MidasDepthEstimator(device="cuda", depth_compile=True)
+
+    with pytest.warns(RuntimeWarning, match="triton"):
+        estimator._load()
+
+    assert compile_calls == []
     assert estimator._model is original_model
     assert estimator._compiled is False
 
@@ -529,3 +558,79 @@ def test_extract_processor_size_ignores_non_int_values() -> None:
         shortest_edge = None
 
     assert _extract_processor_size(_FakeSizeDict(), default=384) == (384, 384)
+
+
+def test_triton_available_returns_bool_without_raising() -> None:
+    from vr_sbs_converter.depth import _triton_available
+
+    result = _triton_available()
+    assert isinstance(result, bool)
+
+
+def test_autocast_ctx_prefers_new_api_when_available() -> None:
+    torch = _import_torch_or_skip()
+    from vr_sbs_converter.depth import _autocast_ctx
+
+    calls: list[dict] = []
+
+    class _FakeCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _new_autocast(**kwargs):
+        calls.append(kwargs)
+        return _FakeCtx()
+
+    class _FakeAmp:
+        autocast = staticmethod(_new_autocast)
+
+    class _FakeTorch:
+        amp = _FakeAmp()
+
+        class cuda:
+            class amp:
+                @staticmethod
+                def autocast(**kwargs):
+                    raise AssertionError("should not fall back to torch.cuda.amp.autocast")
+
+    ctx = _autocast_ctx(_FakeTorch, device_type="cuda", enabled=True)
+    with ctx:
+        pass
+
+    assert calls == [{"device_type": "cuda", "enabled": True}]
+
+
+def test_autocast_ctx_falls_back_to_cuda_amp_when_new_api_missing() -> None:
+    torch = _import_torch_or_skip()
+    from vr_sbs_converter.depth import _autocast_ctx
+
+    calls: list[dict] = []
+
+    class _FakeCtx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakeCudaAmp:
+        @staticmethod
+        def autocast(**kwargs):
+            calls.append(kwargs)
+            return _FakeCtx()
+
+    class _FakeCuda:
+        amp = _FakeCudaAmp()
+
+    class _FakeTorch:
+        # No .amp attribute → forces fallback
+        cuda = _FakeCuda()
+
+    ctx = _autocast_ctx(_FakeTorch, device_type="cuda", enabled=False)
+    with ctx:
+        pass
+
+    assert calls == [{"enabled": False}]
